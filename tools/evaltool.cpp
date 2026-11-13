@@ -1,8 +1,8 @@
 // evaltool.cpp — 증류 결과 측정 / DAgger 리프 수집
 //
-//   static   --model m --data f                 정적 지표 (가치 상관·MAE, 정책 top1/top3, Rapfi 고전평가 대비)
+//   static   --model m --data f                 주 지표: 정적 판단력 (구간별 가치 정확도, 형제 순위, Rapfi 고전평가 대비)
 //   search   --model m --data f --nodes N|--ms T [--limit K]
-//            탐색 라벨이 있는 국면에서 "우리 엔진 최선수 == Rapfi 최선수" 일치율 (목표 지표 80~90%)
+//            보조 지표: 탐색 라벨이 있는 국면에서 우리 엔진 최선수 == Rapfi 최선수 비율, 형세 판정 일치
 //   leafdump --model m --data f --nodes N --prob p --out leaves.bin
 //            우리 탐색 트리의 리프 국면을 확률 p 로 저장 → oracle label 로 재라벨 → 재학습 (분포 이동 보정)
 #include "metrics.hpp"
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     const size_t limit = size_t(num(a, "limit", 1e18));
 
     if (mode == "static") {
-        metrics::Stats st; metrics::evalSet(mdl, recs, st); st.print("[static]");
+        metrics::Report rep; metrics::evalSet(mdl, recs, rep); rep.print("[static]", true);
         return 0;
     }
     if (mode == "search") {

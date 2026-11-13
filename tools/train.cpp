@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> order(recs.size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = uint32_t(i);
 
-    { metrics::Stats st; metrics::evalSet(mdl, val, st); st.print("[init]"); }
+    { metrics::Report rep; metrics::evalSet(mdl, val, rep); rep.print("[init]", false); }
     const size_t stepsPerEpoch = (recs.size() + batch - 1) / batch;
     const size_t totalSteps = stepsPerEpoch * epochs;
     size_t step = 0;
@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
         }
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("epoch %d: train value-bce=%.4f policy-ce=%.4f  (%.1fs)\n", ep + 1, vn ? vl / vn : 0, pn ? pl / pn : 0, secs);
-        metrics::Stats st; metrics::evalSet(mdl, val, st); st.print("  [val]");
+        metrics::Report rep; metrics::evalSet(mdl, val, rep); rep.print("  [val]", ep + 1 == epochs);
         mdl.save(out);
     }
     std::printf("saved %s\n", out.c_str());

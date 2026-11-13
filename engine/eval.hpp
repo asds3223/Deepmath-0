@@ -10,7 +10,7 @@ namespace gmk {
 
 class Model {
 public:
-    static constexpr uint32_t MAGIC = 0x44434531;   // "DCE1"
+    static constexpr uint32_t MAGIC = 0x44434532;   // "DCE2"
     std::vector<float> wv;      // 가치: [2*i] 초반, [2*i+1] 후반
     std::vector<float> wp;      // 정책
     float scale    = 200.f;     // 탐색 정수 점수 = 로짓 × scale
@@ -60,9 +60,10 @@ public:
 };
 
 // 모델이 없을 때의 단순 휴리스틱 (테스트/부트스트랩용)
-inline int heuristicP4Score(int p4) {
-    static const int v[PATTERN4_NB] = {0, 0, 2, 1, 6, 5, 12, 20, 40, 15, 30, 60, 200, 1000};
-    return v[p4];
+inline int heuristicClassScore(int c) {
+    //                         NONE TWO O2 D2 T3 T3+ O3 O3+ D3 F4 F4+ F43 WIN4 FIVE
+    static const int v[CLASS_NB] = {0, 1, 2, 6, 3, 5, 12, 20, 40, 15, 30, 60, 200, 1000};
+    return v[c];
 }
 
 inline int Board::evaluate() const {
@@ -74,7 +75,7 @@ inline int Board::evaluate() const {
     }
     const int s = side - 1, o = 2 - side;
     int e = 0;
-    for (int k = L_FLEX2; k <= B_FLEX4; ++k) e += heuristicP4Score(k) * (p4cnt[s][k] * 3 - p4cnt[o][k] * 2);
+    for (int k = C_TWO; k <= C_WINFOUR; ++k) e += heuristicClassScore(k) * (clsCnt[s][k] * 3 - clsCnt[o][k] * 2);
     return std::max(-2000, std::min(2000, e));
 }
 
@@ -82,12 +83,12 @@ inline int Board::generate(int* out) const {
     if (ply == 0) { out[0] = (BS / 2) * BS + BS / 2; return 1; }
     const int s = side - 1, o = 2 - side;
     const int* cells = feat::boardCells();
-    if (p4cnt[s][A_FIVE]) {                                   // 즉승: 한 수면 충분
-        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && p4[s][cells[m]] == A_FIVE) { out[0] = m; return 1; }
+    if (clsCnt[s][C_FIVE]) {                                  // 즉승: 한 수면 충분
+        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == C_FIVE) { out[0] = m; return 1; }
     }
     int n = 0;
-    if (p4cnt[o][A_FIVE]) {                                   // 상대 4: 막는 수만 합법적으로 의미 있음
-        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && p4[o][cells[m]] == A_FIVE) out[n++] = m;
+    if (clsCnt[o][C_FIVE]) {                                  // 상대 4: 막는 수만 의미 있음
+        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[o][cells[m]] == C_FIVE) out[n++] = m;
         return n;
     }
     float sc[NMOVES];
@@ -96,7 +97,7 @@ inline int Board::generate(int* out) const {
         const int c = cells[m];
         if (!isCandidate(c)) continue;
         sc[n] = model ? model->policyScore(*this, c, tc)
-                      : float(heuristicP4Score(p4[s][c]) * 2 + heuristicP4Score(p4[o][c]));
+                      : float(heuristicClassScore(cls[s][c]) * 2 + heuristicClassScore(cls[o][c]));
         out[n++] = m;
     }
     // 점수 내림차순 정렬 (삽입 정렬, n ≤ ~120)

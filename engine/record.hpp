@@ -6,6 +6,7 @@
 //   pol*  : NNUE 정책 상위 16개 (확률 × 65535)
 //   srch* : Rapfi PVS+NNUE 고정 노드 탐색 결과 (선택)
 //   rcls  : Rapfi 내장 고전 평가의 승률 (비교 베이스라인)
+//   grp   : 형제 그룹 — 같은 부모의 자식 국면들. "어느 쪽이 더 나은가" 판단력 지표에 쓴다
 #pragma once
 #include "board.hpp"
 #include <cstdint>
@@ -21,6 +22,7 @@ enum RecFlags : uint8_t {
     REC_OPPO_FIVE  = 2,   // 상대 4 를 막아야 함 (강제수)
     REC_HAS_SEARCH = 4,
     REC_LEAF       = 8,   // 우리 탐색 트리의 리프에서 수집된 국면 (DAgger)
+    REC_SIBLING    = 16,  // 같은 부모에서 서로 다른 수로 갈라진 형제 국면 (group 으로 묶임)
 };
 
 struct Record {
@@ -37,9 +39,11 @@ struct Record {
     uint8_t  srchBest;        // 255 = 없음
     int8_t   srchDepth;
     uint8_t  polN;
-    uint8_t  pad[3];
+    uint8_t  grp[3];          // 형제 그룹 id (24bit, 0 = 없음)
 
     float nnWinrate() const { return nnW + 0.5f * nnD; }
+    uint32_t group() const { return grp[0] | grp[1] << 8 | uint32_t(grp[2]) << 16; }
+    void setGroup(uint32_t g) { grp[0] = uint8_t(g); grp[1] = uint8_t(g >> 8); grp[2] = uint8_t(g >> 16); }
 
     void setBoard(const Board& b) {
         std::memset(board, 0, sizeof board);

@@ -2,9 +2,10 @@
 //
 // 모드
 //   gen        Rapfi NNUE 정책 샘플링 롤아웃으로 국면을 만들고, NNUE 가치/정책(+선택적 탐색) 라벨을 붙인다.
-//              (우리 엔진 자가대국이 아니라 교사 모델이 두는 국면 분포)
+//              (우리 엔진 자가대국이 아니라 교사 모델이 두는 국면 분포 + 무작위 섭동)
+//              --sib-prob 로 일부 국면에서 형제 국면 묶음(상위 정책 수 + 무작위 수)을 함께 기록한다.
+//              형제 묶음은 "같은 부모에서 어느 자식이 더 나은가"를 NNUE 와 같게 판단하는지 재는 데 쓴다.
 //   label      기존 레코드(예: 우리 탐색 트리 리프 덤프)에 NNUE 가치/정책/탐색 라벨을 다시 붙인다.
-//   crosscheck 우리 pattern.hpp/board.hpp 의 패턴·Pattern4 가 Rapfi 와 완전히 같은지 무작위 국면에서 검증.
 //   bench      NNUE 정적 평가·정책·탐색 처리량 측정 (데이터 예산 산정용)
 //
 // 병렬: 한 프로세스 = 한 코어. 대량 작업은 scripts/ 의 셸 스크립트가 코어 수만큼 프로세스를 띄운다.
@@ -18,6 +19,7 @@
 #include "game/board.h"
 #include "search/searchthread.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -89,6 +91,11 @@ struct Pair {
         plain->move(Rule::FREESTYLE, toPos(m));
         gb.make(m);
     }
+    void undo() {
+        rb->undo(Rule::FREESTYLE);
+        plain->undo(Rule::FREESTYLE);
+        gb.undo(gb.lastMove());
+    }
     // 탐색은 스레드 보드를 교체하므로, 끝난 뒤 평가자 보드를 다시 동기화
     void resyncAfterSearch() {
         Board snap(*plain, nullptr);
@@ -157,8 +164,8 @@ void fillRecord(gmk::Record& r, Pair& p, const NNOut& nn) {
     r.polN = uint8_t(n);
     for (int i = 0; i < n; ++i) { r.polIdx[i] = uint8_t(nn.pol[i].second); r.polProb[i] = uint16_t(std::lround(nn.pol[i].first * 65535)); }
     const int s = p.gb.side - 1, o = 2 - p.gb.side;
-    if (p.gb.p4cnt[s][gmk::A_FIVE]) r.flags |= gmk::REC_SELF_FIVE;
-    if (p.gb.p4cnt[o][gmk::A_FIVE]) r.flags |= gmk::REC_OPPO_FIVE;
+    if (p.gb.clsCnt[s][gmk::C_FIVE]) r.flags |= gmk::REC_SELF_FIVE;
+    if (p.gb.clsCnt[o][gmk::C_FIVE]) r.flags |= gmk::REC_OPPO_FIVE;
 }
 
 // ── gen ──
@@ -173,6 +180,11 @@ int cmdGen(const std::map<std::string, std::string>& a) {
     const float    sprob   = get(a, "search-prob", 0.0);
     const int      maxPly  = get(a, "max-ply", 180);
     const std::string out  = get<std::string>(a, "out", "gen.bin");
+    const float    sibProb = get(a, "sib-prob", 0.0);     // 형제 묶음 기록 확률
+    const int      sibTop  = get(a, "sib-top", 4);        // 정책 상위 수 개수
+    const int      sibRand = get(a, "sib-rand", 4);       // 무작위 후보 수 개수
+    const float    tempLate = get(a, "temp-late", 0.0);   // >0 이면 오프닝 이후 온도
+    uint32_t groupId = uint32_t((seed * 2654435761ull) & 0xffff) << 8;   // 프로세스별 시작값
 
     gmk::RecordWriter w(out);
     if (!w.ok()) { std::fprintf(stderr, "cannot open %s\n", out.c_str()); return 1; }
@@ -209,11 +221,34 @@ int cmdGen(const std::map<std::string, std::string>& a) {
                         w.write(r); ++nrec;
                     }
                 }
+                if (sibProb > 0 && U(rng) < sibProb && !(p.gb.clsCnt[p.gb.side - 1][gmk::C_FIVE])) {
+                    // 형제 묶음: 정책 상위 sibTop + 무작위 후보 sibRand (중복 제거)
+                    std::vector<int> kids;
+                    for (int i = 0; i < int(nn.pol.size()) && int(kids.size()) < sibTop; ++i) kids.push_back(nn.pol[i].second);
+                    for (int t = 0; t < 4 * sibRand && int(kids.size()) < sibTop + sibRand; ++t) {
+                        int m = cand[rng() % nc];
+                        if (std::find(kids.begin(), kids.end(), m) == kids.end()) kids.push_back(m);
+                    }
+                    groupId = (groupId + 1) & 0xffffff; if (!groupId) groupId = 1;
+                    for (int m : kids) {
+                        p.move(m);
+                        if (!p.gb.isLoss()) {
+                            NNOut cn = nnEval(p);
+                            gmk::Record cr; fillRecord(cr, p, cn);
+                            if (!(cr.flags & gmk::REC_SELF_FIVE)) {
+                                cr.flags |= gmk::REC_SIBLING; cr.setGroup(groupId);
+                                w.write(cr); ++nrec;
+                            }
+                        }
+                        p.undo();
+                    }
+                }
                 if (U(rng) < eps) mv = cand[rng() % nc];
                 else {
                     // 온도 적용 정책 샘플링
                     double tot = 0; std::vector<double> pr(nn.pol.size());
-                    for (size_t i = 0; i < nn.pol.size(); ++i) tot += pr[i] = std::pow(std::max(nn.pol[i].first, 1e-12f), 1.0 / temp);
+                    const double tt = (tempLate > 0 && ply >= nOpen + 4) ? tempLate : temp;
+                    for (size_t i = 0; i < nn.pol.size(); ++i) tot += pr[i] = std::pow(std::max(nn.pol[i].first, 1e-12f), 1.0 / tt);
                     double r = U(rng) * tot; mv = nn.pol[0].second;
                     for (size_t i = 0; i < pr.size(); ++i) { r -= pr[i]; if (r <= 0) { mv = nn.pol[i].second; break; } }
                 }
@@ -272,42 +307,6 @@ int cmdLabel(const std::map<std::string, std::string>& a) {
     return 0;
 }
 
-// ── crosscheck ──
-int cmdCrosscheck(const std::map<std::string, std::string>& a) {
-    const int games = get(a, "games", 200);
-    std::mt19937_64 rng(get<uint64_t>(a, "seed", 7));
-    static const int dirMap[4] = {0, 1, 3, 2};   // gmk 방향 → Rapfi 방향 (↘/↙ 순서가 반대)
-    uint64_t cells = 0, patMis = 0, p4Mis = 0;
-    for (int g = 0; g < games; ++g) {
-        auto rb = std::make_unique<Board>(gmk::BS, CandidateRange::SQUARE3_LINE4);
-        rb->newGame(Rule::FREESTYLE);
-        gmk::Board gb;
-        for (int ply = 0; ply < 160; ++ply) {
-            int cand[gmk::NMOVES], nc = 0;
-            for (int m = 0; m < gmk::NMOVES; ++m) if (gb.isEmptyMove(m) && (ply == 0 || gb.isCandidate(gmk::toCell(m)))) cand[nc++] = m;
-            if (!nc || gb.isLoss()) break;
-            int m = cand[rng() % nc];
-            rb->move(Rule::FREESTYLE, toPos(m)); gb.make(m);
-            if (gb.isLoss()) break;
-            for (int q = 0; q < gmk::NMOVES; ++q) {
-                if (!gb.isEmptyMove(q)) continue;
-                const Cell& rc = rb->cell(toPos(q));
-                const int c = gmk::toCell(q);
-                ++cells;
-                for (int col = 0; col < 2; ++col) {
-                    Color rcol = col == 0 ? BLACK : WHITE;
-                    for (int d = 0; d < 4; ++d)
-                        if (int(rc.pattern(rcol, dirMap[d])) != int(gb.pat[col][d][c])) ++patMis;
-                    if (int(rc.pattern4[rcol]) != int(gb.p4[col][c])) ++p4Mis;
-                }
-            }
-        }
-    }
-    std::printf("crosscheck: empty-cells=%llu pattern-mismatch=%llu pattern4-mismatch=%llu\n",
-                (unsigned long long)cells, (unsigned long long)patMis, (unsigned long long)p4Mis);
-    return (patMis || p4Mis) ? 1 : 0;
-}
-
 // ── bench ──
 int cmdBench(const std::map<std::string, std::string>& a) {
     const uint64_t nodes = get<uint64_t>(a, "search-nodes", 50000);
@@ -344,7 +343,7 @@ int cmdBench(const std::map<std::string, std::string>& a) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: oracle <gen|label|crosscheck|bench> [--config path] [options]\n");
+        std::fprintf(stderr, "usage: oracle <gen|label|bench> [--config path] [options]\n");
         return 2;
     }
     Command::CommandLine::init(argc, argv);
@@ -353,7 +352,6 @@ int main(int argc, char** argv) {
     if (!initRapfi(get<std::string>(a, "config", "config.toml"), get(a, "tt-mb", 64))) return 1;
     if (mode == "gen") return cmdGen(a);
     if (mode == "label") return cmdLabel(a);
-    if (mode == "crosscheck") return cmdCrosscheck(a);
     if (mode == "bench") return cmdBench(a);
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;

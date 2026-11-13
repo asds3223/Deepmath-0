@@ -1,11 +1,21 @@
-// pattern.hpp — 15x15 프리스타일 라인 패턴 분류기 (헤더 온리, C++17)
+// pattern.hpp — 라인 위협 단계 분류 (독자 정의, 헤더 온리, C++17)
 //
-// Rapfi(GPL-3) game/pattern.cpp 의 FREESTYLE 분류 알고리즘을 그대로 옮긴 것이다.
-// 목적: 우리 고전 평가의 "패턴 어휘"를 Rapfi 와 1:1 로 맞춰서, NNUE 판단을 증류할 때
-//       같은 개념 단위(B4/F3/...)로 비교·분석할 수 있게 한다. (oracle crosscheck 로 검증)
+// 한 칸 c 에 "자기 돌을 놓는다"고 가정하고, c 를 지나는 한 방향 9칸 창(±4)만 보고
+// "c 를 포함하는 5목"까지 얼마나 가까운지를 완성점(completion point) 집합으로 정의한다.
 //
-// 라인 키(16bit): 중심 칸을 뺀 8칸 × 2bit.  슬롯 0..3 = 오프셋 -4..-1, 슬롯 4..7 = +1..+4
-// 상대 인코딩: 0 빈칸, 1 자기(self), 2 상대(oppo), 3 벽
+//   FIVE   c 를 두면 c 를 포함한 5목 이상 (프리스타일: 장목도 승리)
+//   OPEN4  c 를 둔 뒤 c 를 포함한 5목 완성점이 2곳 이상   (막을 수 없는 4)
+//   FOUR   완성점 1곳
+//   OPEN3  한 칸을 더 두면 OPEN4 가 되는 칸이 있다
+//   THREE  한 칸을 더 두면 FOUR 가 되는 칸만 있다
+//   OPEN2  한 칸을 더 두면 OPEN3 가 되는 칸이 있다
+//   TWO    한 칸을 더 두면 THREE 가 된다
+//   ONE    c 를 포함하는 막히지 않은 5칸 창이 있다
+//   DEAD   c 를 포함해 5목을 만들 공간이 없다
+//
+// 칸 단위 조합(4방향): 4개 단계의 중복조합 코드(495종)와, 그로부터 정한 칸 등급 CellClass.
+// 라인 키(16bit): 중심을 뺀 8칸 × 2bit. 슬롯 0..3 = 오프셋 -4..-1, 4..7 = +1..+4
+// 상대 인코딩: 0 빈칸, 1 자기, 2 상대, 3 벽
 #pragma once
 #include <algorithm>
 #include <array>
@@ -13,138 +23,136 @@
 
 namespace gmk {
 
-enum Pattern : uint8_t { DEAD, OL, B1, F1, B2, F2, F2A, F2B, B3, F3, F3S, B4, F4, F5, PATTERN_NB };
+enum Level : uint8_t { DEAD, ONE, TWO, OPEN2, THREE, OPEN3, FOUR, OPEN4, FIVE, LEVEL_NB };
 
-enum Pattern4 : uint8_t {
-    NONE, FORBID, L_FLEX2, K_BLOCK3, J_FLEX2_2X, I_BLOCK3_PLUS, H_FLEX3, G_FLEX3_PLUS,
-    F_FLEX3_2X, E_BLOCK4, D_BLOCK4_PLUS, C_BLOCK4_FLEX3, B_FLEX4, A_FIVE, PATTERN4_NB
+enum CellClass : uint8_t {
+    C_NONE, C_TWO, C_OPEN2, C_DOUBLE2, C_THREE, C_THREE_PLUS, C_OPEN3, C_OPEN3_PLUS,
+    C_DOUBLE3, C_FOUR, C_FOUR_PLUS, C_FOUR3, C_WINFOUR, C_FIVE, CLASS_NB
 };
 
-constexpr int KEY_NB   = 1 << 16;
-constexpr int PCODE_NB = 2380;          // C(14+4-1, 4): 4방향 패턴 중복조합 수
+constexpr int KEY_NB  = 1 << 16;
+constexpr int CODE_NB = 495;        // C(9+4-1, 4)
 
-inline const char* patternName(int p) {
-    static const char* n[] = {"DEAD","OL","B1","F1","B2","F2","F2A","F2B","B3","F3","F3S","B4","F4","F5"};
-    return p >= 0 && p < PATTERN_NB ? n[p] : "?";
+inline const char* levelName(int l) {
+    static const char* n[] = {"DEAD", "ONE", "TWO", "OPEN2", "THREE", "OPEN3", "FOUR", "OPEN4", "FIVE"};
+    return l >= 0 && l < LEVEL_NB ? n[l] : "?";
 }
-inline const char* pattern4Name(int p) {
-    static const char* n[] = {"NONE","FORBID","L_FLEX2","K_BLOCK3","J_FLEX2_2X","I_BLOCK3_PLUS","H_FLEX3",
-                              "G_FLEX3_PLUS","F_FLEX3_2X","E_BLOCK4","D_BLOCK4_PLUS","C_BLOCK4_FLEX3","B_FLEX4","A_FIVE"};
-    return p >= 0 && p < PATTERN4_NB ? n[p] : "?";
+inline const char* className(int c) {
+    static const char* n[] = {"NONE", "TWO", "OPEN2", "DOUBLE2", "THREE", "THREE+", "OPEN3", "OPEN3+",
+                              "DOUBLE3", "FOUR", "FOUR+", "FOUR3", "WINFOUR", "FIVE"};
+    return c >= 0 && c < CLASS_NB ? n[c] : "?";
 }
 
-class PatternTables {
+// 위협 단계 → 전술 등급 (정책/전역 특징의 거친 버킷)
+inline int classTier(int c) {
+    return c >= C_DOUBLE3 ? (c >= C_FOUR3 || c == C_DOUBLE3 ? 4 : 3) : c >= C_OPEN3 ? 2 : c >= C_THREE ? 1 : 0;
+}
+
+class LineTables {
 public:
-    uint8_t  patSelf[KEY_NB];           // 상대 키 → 자기 돌을 중심에 놓았을 때의 패턴
-    uint16_t swapKey[KEY_NB];           // self/oppo 교환 (1<->2)
-    uint16_t revKey[KEY_NB];            // 라인 방향 반전
-    uint16_t pcode[PATTERN_NB][PATTERN_NB][PATTERN_NB][PATTERN_NB];
-    uint8_t  p4OfPcode[PCODE_NB];
-    uint8_t  pcodePats[PCODE_NB][4];    // pcode → 정렬된 4패턴
+    uint8_t  level[KEY_NB];          // 상대 키 → 자기 관점 단계
+    uint16_t swapKey[KEY_NB];        // 자기/상대 교환
+    uint16_t revKey[KEY_NB];         // 방향 반전
+    uint16_t code[LEVEL_NB][LEVEL_NB][LEVEL_NB][LEVEL_NB];
+    uint8_t  classOf[CODE_NB];
+    uint8_t  codeLevels[CODE_NB][4];
 
-    static const PatternTables& get() { static const PatternTables t; return t; }
+    static const LineTables& get() { static const LineTables t; return t; }
 
 private:
-    enum CF : uint8_t { SELF, OPPO, EMPT };
-    using Line = std::array<uint8_t, 9>;
-    static constexpr int Mid = 4;
+    // 9칸 창: bit i (0..8) — 자기 돌 마스크 / 막힘(상대·벽) 마스크
+    struct Win { uint16_t self, block; };
+    static constexpr int C = 4;   // 중심 인덱스
 
-    std::array<uint8_t, 19683> memo_;   // 3^9
+    // c 를 포함하는 5칸 창(시작 0..4) 중 막힘 없는 것에 대해, 자기 돌로 채워진 경우 5목
+    static bool fiveThroughCenter(uint16_t self) {
+        // 연속 길이로 판정 (장목 포함)
+        int run = 1;
+        for (int i = C - 1; i >= 0 && (self >> i & 1); --i) ++run;
+        for (int i = C + 1; i < 9 && (self >> i & 1); ++i) ++run;
+        return run >= 5;
+    }
+    static int completions(Win w) {
+        int n = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (i == C || (w.self >> i & 1) || (w.block >> i & 1)) continue;
+            if (fiveThroughCenter(w.self | uint16_t(1 << i))) ++n;
+        }
+        return n;
+    }
+    static bool hasSpace(Win w) {
+        for (int s = 0; s <= 4; ++s) {
+            uint16_t m = uint16_t(0x1f << s);
+            if (!(w.block & m)) return true;
+        }
+        return false;
+    }
+    // 단계 계산 (중심에 자기 돌이 이미 놓인 창). depth: 남은 선행 수
+    static int levelOf(Win w, int depth) {
+        if (fiveThroughCenter(w.self)) return FIVE;
+        if (!hasSpace(w)) return DEAD;
+        const int k = completions(w);
+        if (k >= 2) return OPEN4;
+        if (k == 1) return FOUR;
+        if (depth == 0) return ONE;
+        int best = ONE;
+        for (int i = 0; i < 9; ++i) {
+            if (i == C || (w.self >> i & 1) || (w.block >> i & 1)) continue;
+            const int l = levelOf(Win{uint16_t(w.self | (1 << i)), w.block}, depth - 1);
+            // 한 수 더 두었을 때의 단계 → 현재 단계로 한 칸 내림
+            const int down = l == OPEN4 ? OPEN3 : l == FOUR ? THREE : l == OPEN3 ? OPEN2 : l == THREE ? TWO : ONE;
+            best = std::max(best, down);
+        }
+        return best;
+    }
 
-    PatternTables() {
-        memo_.fill(0xff);
+    LineTables() {
         for (int k = 0; k < KEY_NB; ++k) {
-            Line l;
-            for (int i = 0; i < 9; ++i) {
-                if (i == Mid) { l[i] = SELF; continue; }
-                const int s = i < Mid ? i : i - 1;
-                const int v = (k >> (2 * s)) & 3;
-                l[i] = v == 0 ? EMPT : v == 1 ? SELF : OPPO;
-            }
-            patSelf[k] = classify(l);
+            Win w{uint16_t(1 << C), 0};
             int sw = 0, rv = 0;
             for (int s = 0; s < 8; ++s) {
-                int v = (k >> (2 * s)) & 3;
+                const int v = (k >> (2 * s)) & 3;
+                const int i = s < 4 ? s : s + 1;
+                if (v == 1) w.self |= uint16_t(1 << i);
+                else if (v >= 2) w.block |= uint16_t(1 << i);
                 sw |= (v == 1 ? 2 : v == 2 ? 1 : v) << (2 * s);
                 rv |= v << (2 * (7 - s));
             }
+            level[k]   = uint8_t(levelOf(w, 2));
             swapKey[k] = uint16_t(sw);
             revKey[k]  = uint16_t(rv);
         }
-        int idx = 0;
-        int tmp[PATTERN_NB][PATTERN_NB][PATTERN_NB][PATTERN_NB];
-        for (auto& a : tmp) for (auto& b : a) for (auto& c : b) for (auto& d : c) d = -1;
-        for (int a = 0; a < PATTERN_NB; ++a) for (int b = a; b < PATTERN_NB; ++b)
-        for (int c = b; c < PATTERN_NB; ++c) for (int d = c; d < PATTERN_NB; ++d) {
+        int idx = 0, tmp[LEVEL_NB][LEVEL_NB][LEVEL_NB][LEVEL_NB];
+        for (int a = 0; a < LEVEL_NB; ++a) for (int b = a; b < LEVEL_NB; ++b)
+        for (int c = b; c < LEVEL_NB; ++c) for (int d = c; d < LEVEL_NB; ++d) {
             tmp[a][b][c][d] = idx;
-            pcodePats[idx][0] = uint8_t(a); pcodePats[idx][1] = uint8_t(b);
-            pcodePats[idx][2] = uint8_t(c); pcodePats[idx][3] = uint8_t(d);
-            p4OfPcode[idx] = combine(Pattern(a), Pattern(b), Pattern(c), Pattern(d));
+            codeLevels[idx][0] = uint8_t(a); codeLevels[idx][1] = uint8_t(b);
+            codeLevels[idx][2] = uint8_t(c); codeLevels[idx][3] = uint8_t(d);
+            classOf[idx] = classify(a, b, c, d);
             ++idx;
         }
-        for (int a = 0; a < PATTERN_NB; ++a) for (int b = 0; b < PATTERN_NB; ++b)
-        for (int c = 0; c < PATTERN_NB; ++c) for (int d = 0; d < PATTERN_NB; ++d) {
-            int v[4] = {a, b, c, d};
-            std::sort(v, v + 4);
-            pcode[a][b][c][d] = uint16_t(tmp[v[0]][v[1]][v[2]][v[3]]);
+        for (int a = 0; a < LEVEL_NB; ++a) for (int b = 0; b < LEVEL_NB; ++b)
+        for (int c = 0; c < LEVEL_NB; ++c) for (int d = 0; d < LEVEL_NB; ++d) {
+            int v[4] = {a, b, c, d}; std::sort(v, v + 4);
+            code[a][b][c][d] = uint16_t(tmp[v[0]][v[1]][v[2]][v[3]]);
         }
     }
 
-    static int code(const Line& l) { int c = 0; for (int i = 0; i < 9; ++i) c = c * 3 + l[i]; return c; }
-
-    uint8_t classify(const Line& line) {
-        uint8_t& m = memo_[code(line)];
-        if (m != 0xff) return m;
-        int realLen = 1, fullLen = 1, inc = 1, start = Mid, end = Mid;
-        for (int i = Mid - 1; i >= 0; --i) {
-            if (line[i] == SELF) realLen += inc; else if (line[i] == OPPO) break; else inc = 0;
-            ++fullLen; start = i;
-        }
-        inc = 1;
-        for (int i = Mid + 1; i < 9; ++i) {
-            if (line[i] == SELF) realLen += inc; else if (line[i] == OPPO) break; else inc = 0;
-            ++fullLen; end = i;
-        }
-        Pattern p = DEAD;
-        if (realLen >= 5) p = F5;                     // 프리스타일: 장목도 승리
-        else if (fullLen < 5) p = DEAD;
-        else {
-            int cnt[PATTERN_NB] = {0};
-            for (int i = start; i <= end; ++i) {
-                if (line[i] != EMPT) continue;
-                Line sl;
-                for (int j = 0; j < 9; ++j) { int id = j + i - Mid; sl[j] = (id >= 0 && id < 9) ? line[id] : OPPO; }
-                sl[Mid] = SELF;
-                cnt[classify(sl)]++;
-            }
-            if      (cnt[F5] >= 2)               p = F4;
-            else if (cnt[F5])                    p = B4;
-            else if (cnt[F4] >= 2)               p = F3S;
-            else if (cnt[F4])                    p = F3;
-            else if (cnt[B4])                    p = B3;
-            else if (cnt[F3S] + cnt[F3] >= 4)    p = F2B;
-            else if (cnt[F3S] + cnt[F3] >= 3)    p = F2A;
-            else if (cnt[F3S] + cnt[F3])         p = F2;
-            else if (cnt[B3])                    p = B2;
-            else if (cnt[F2] + cnt[F2A] + cnt[F2B]) p = F1;
-            else if (cnt[B2])                    p = B1;
-        }
-        return m = uint8_t(p);
-    }
-
-    static uint8_t combine(Pattern p1, Pattern p2, Pattern p3, Pattern p4) {
-        int n[PATTERN_NB] = {0};
-        n[p1]++; n[p2]++; n[p3]++; n[p4]++;
-        const int f2 = n[F2] + n[F2A] + n[F2B], f3 = n[F3] + n[F3S];
-        if (n[F5] >= 1) return A_FIVE;
-        if (n[B4] >= 2 || n[F4] >= 1) return B_FLEX4;
-        if (n[B4] >= 1) return f3 ? C_BLOCK4_FLEX3 : (n[B3] || f2) ? D_BLOCK4_PLUS : E_BLOCK4;
-        if (f3 >= 1)    return f3 >= 2 ? F_FLEX3_2X : (n[B3] || f2) ? G_FLEX3_PLUS : H_FLEX3;
-        if (n[B3] >= 2 || (n[B3] >= 1 && f2 >= 1)) return I_BLOCK3_PLUS;
-        if (f2 >= 2) return J_FLEX2_2X;
-        if (n[B3] >= 1) return K_BLOCK3;
-        if (f2 >= 1) return L_FLEX2;
-        return NONE;
+    static uint8_t classify(int a, int b, int c, int d) {
+        int n[LEVEL_NB] = {0};
+        n[a]++; n[b]++; n[c]++; n[d]++;
+        const int fours = n[FOUR], open3 = n[OPEN3], minor = n[THREE] + n[OPEN2];
+        if (n[FIVE])                    return C_FIVE;
+        if (n[OPEN4] || fours >= 2)     return C_WINFOUR;
+        if (fours && open3)             return C_FOUR3;
+        if (fours)                      return minor ? C_FOUR_PLUS : C_FOUR;
+        if (open3 >= 2)                 return C_DOUBLE3;
+        if (open3)                      return minor ? C_OPEN3_PLUS : C_OPEN3;
+        if (n[THREE])                   return (n[THREE] >= 2 || n[OPEN2]) ? C_THREE_PLUS : C_THREE;
+        if (n[OPEN2] >= 2)              return C_DOUBLE2;
+        if (n[OPEN2])                   return C_OPEN2;
+        if (n[TWO])                     return C_TWO;
+        return C_NONE;
     }
 };
 
