@@ -67,7 +67,6 @@ public:
     // ── 증분 평가 상태 (model 이 붙어 있을 때만 유지) ──
     int32_t  vacc[2][2];              // [관점 P(0=흑이 self)][테이퍼 세트] 칸 단위 가치 합 (점수×16)
     uint64_t candBits[4];             // 후보 칸 비트셋 (수 인덱스)
-    bool     light = false;           // true 면 make/undo 가 패턴만 갱신 (방어 판정용 시험 착수)
     int32_t  vcache[CELLS][4];        // 칸별 현재 가치 기여 캐시 [P0s0, P0s1, P1s0, P1s1] (뺄 때 재계산 생략)
 
     Board() { clear(); }
@@ -128,22 +127,19 @@ public:
     }
     bool isLoss() const { return ply > 0 && fiveMade[ply - 1]; }
     bool isDraw() const { return ply >= NMOVES; }
-    int  evaluate() const;            // eval.hpp
-    int  generate(int* out) const;    // eval.hpp (정책 순 정렬)
-    int  generateScored(int* out, int* score, uint8_t* tactical) const;   // eval.hpp (정렬 없음, 탐색용)
+    int  evaluate() const;                                              // eval.hpp
+    int  generate(int* out) const;                                      // eval.hpp: 정책 점수 순
+    int  generateScored(int* out, int* score, uint8_t* tactical) const; // eval.hpp: 탐색용 (정렬 없음)
+
     // ── 위협 상태 ──
-    // 상대가 다음 수에 5목(=4 를 막아야 함) 또는 4-3/승리 4 를 만들 수 있으면 "위협 상태".
-    // 위협 상태에서는 위협을 실제로 없애는 수와 우리 4(맞받기)만 의미가 있다 (체스의 체크 회피와 같은 취급).
+    // 상대가 다음 수에 5목(→ 막아야 함) 또는 4-3/승리 4 를 만들 수 있으면 위협 상태다.
+    // 이때는 위협을 실제로 없애는 수와 우리 4(맞받기)만 의미가 있다 (체스의 체크 회피와 같은 취급).
     bool oppFive() const   { return clsCnt[2 - side][C_FIVE] > 0; }
     bool oppThreat() const { const int* O = clsCnt[2 - side]; return O[C_FOUR3] + O[C_WINFOUR] > 0; }
-    bool mustDefend() const { return oppFive(); }
-    bool quietNode() const { return !oppFive() && !oppThreat() && !clsCnt[side - 1][C_FIVE]; }   // 전술 위기 없음                           // 정지 탐색 강제 방어: 상대 4 만
-    int  defenseMoves(int* out) const;                                     // eval.hpp
-    // VCF(연속 4) 강제승 판정: 둘 차례가 4 만 계속 두어 이길 수 있으면 true, dist = 승리까지 수 (eval.hpp)
-    bool vcfWin(int maxPly, int& dist) const;
-    bool vcfProbe(int plyFromRoot, int& score) const;
-    int  rootVct(int maxAttack, int budget) const;           // 루트 VCT 첫 수 (eval.hpp)
-    int  forcingMoves(int* out, bool allowThree) const;                    // eval.hpp: 4 (+열린 3) 만드는 수
+    bool quietNode() const { return !oppFive() && !oppThreat() && !clsCnt[side - 1][C_FIVE]; }   // 전술 위기 없음
+    bool mustDefend() const { return oppFive(); }                       // 정지 탐색: 상대 4 는 막아야 한다
+    int  defenseMoves(int* out) const;                                  // eval.hpp
+    int  forcingMoves(int* out) const;                                  // eval.hpp: 4 를 만드는 수
 
     // 리프에서 정확히 판정 가능한 전술 상황
     bool leafProbe(int plyFromRoot, int& score) const {
@@ -222,7 +218,7 @@ private:
     void put(int c, int col) {
         const auto& T = LineTables::get();
         int aff[40], na = 0;
-        const bool inc = model && !light;
+        const bool inc = model != nullptr;
         if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
         clsCnt[0][cls[0][c]]--; clsCnt[1][cls[1][c]]--;
         cls[0][c] = cls[1][c] = C_NONE;
@@ -246,7 +242,7 @@ private:
     void remove(int c) {
         const auto& T = LineTables::get();
         int aff[40], na = 0;
-        const bool inc = model && !light;
+        const bool inc = model != nullptr;
         if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
         const int col = cell[c];
         cell[c] = EMPTY;

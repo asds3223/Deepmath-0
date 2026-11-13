@@ -2,13 +2,14 @@
 //   실전 규칙: 싱글코어, 폰더링 없음 (명령 사이에는 아무 계산도 하지 않는다).
 //   15x15 프리스타일 전용. 가중치는 실행 파일에 내장(DCE_EMBED_MODEL) — 파일 하나로 동작.
 //
-//   pbrain-dce [--model 파일.dce] [--tt-mb N] [--vcf 0|1] [--vcf-budget N]   프로토콜 모드
+//   pbrain-dce [--model 파일.dce] [--tt-mb N] [--set 키=값 ...]   프로토콜 모드 (--set: ab::Config 필드, 예 rfpDepth=4)
 //   pbrain-dce bench                              속도 측정 (고정 국면 탐색 nps)
 //
 // 정보 출력 (반복 완료마다 MESSAGE 한 줄, 탐색 중 추가 비용 없음):
 //   depth  완료 반복 깊이 / sel 선택 깊이(정지 탐색·VCF 포함 실제 최대 수 깊이)
 //   ev 평가(점수) wr 승률(둘 차례 관점) nodes 노드 nps 초당 노드 tm 경과 ms pv 예상 수순
 #include "eval.hpp"
+#include "params.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -26,7 +27,7 @@ using namespace gmk;
 
 namespace {
 
-const char* VERSION = "0.6";
+const char* VERSION = "0.6.1";
 
 std::string coord(int m) {     // a1 ~ o15 (열 문자 + 행 번호)
     if (m < 0) return "--";
@@ -117,14 +118,14 @@ int bench(Engine& e) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string modelPath; size_t ttMb = 128; bool doBench = false, vcfOn = false;
+    std::string modelPath; size_t ttMb = 128; bool doBench = false;
+    std::vector<std::string> sets;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--model" && i + 1 < argc) modelPath = argv[++i];
         else if (a == "--tt-mb" && i + 1 < argc) ttMb = std::stoul(argv[++i]);
         else if (a == "bench") doBench = true;
-        else if (a == "--vcf" && i + 1 < argc) vcfOn = std::stoi(argv[++i]) != 0;
-        else if (a == "--vcf-budget" && i + 1 < argc) g_vcfBudget = std::stoi(argv[++i]);
+        else if (a == "--set" && i + 1 < argc) sets.push_back(argv[++i]);
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     Engine e(ttMb);
@@ -132,7 +133,8 @@ int main(int argc, char** argv) {
 #ifdef DCE_EMBED_MODEL
     if (!e.hasModel) { e.hasModel = e.model.loadMem(kModelData, kModelSize); e.modelSrc = "embedded"; }
 #endif
-    e.searcher.cfg.useVCF = vcfOn;
+    for (const auto& kv : sets)
+        if (!ab::setParamKV(e.searcher.cfg, kv)) std::fprintf(stderr, "unknown search setting: %s\n", kv.c_str());
     e.reset();
     if (doBench) return bench(e);
 

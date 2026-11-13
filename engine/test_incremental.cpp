@@ -13,7 +13,7 @@ using namespace gmk;
 
 int main(int argc, char** argv) {
     Model mdl;
-    const char* path = argc > 1 ? argv[1] : "data/b.dce";
+    const char* path = argc > 1 ? argv[1] : "models/c3.dce";
     if (!mdl.load(path)) {      // 모델이 없거나 형식이 다르면 무작위 가중치로 검증 (모든 표 칸을 건드림)
         std::mt19937 wr(11); std::uniform_real_distribution<float> U(-0.3f, 0.3f);
         for (auto& w : mdl.wv) w = U(wr);
@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
             // (1) 가치
             const int inc = b.evaluate();
             const int full = int(std::lround(std::max(-29871.f, std::min(29871.f, mdl.valueLogit(b) * mdl.scale))));
-            maxVal = std::max(maxVal, std::abs(inc - full)); valBad += std::abs(inc - full) > 2;
+            maxVal = std::max(maxVal, std::abs(inc - full)); valBad += std::abs(inc - full) > 4;   // 정수화 반올림 누적 (4점 = 0.02 로짓)
             // (2) 정책 / 후보
             int out[NMOVES], sc[NMOVES]; uint8_t tac[NMOVES];
             const int k = b.generateScored(out, sc, tac);

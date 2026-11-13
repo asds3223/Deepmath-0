@@ -104,9 +104,6 @@ private:
         }
     }
 };
-inline bool g_useShape = true;
-inline bool g_policyExt = true;  // 정책 확장 표(PLS/PR*) 사용
-inline bool g_policyExt2 = true; // 정책 2차 결합 표(PTC/PTO/PL*) 사용   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
 
 inline int orbitOf(int c) {       // 15x15 D4 대칭 궤도 (36개)
     int x = cellX(c), y = cellY(c);
@@ -181,7 +178,7 @@ inline void valueFeatures(const Board& b, F&& emit) {
             if (!near) continue;
             emit(L.CS + b.code[s][c]);
             emit(L.CO + b.code[o][c]);
-            if (g_useShape && keyHasStone(b.sh[c]))
+            if (keyHasStone(b.sh[c]))
                 emit(L.SH + ShapeCanon::get().id[self == BLACK ? b.sh[c] : LineTables::get().swapKey[b.sh[c]]]);
             const int a = b.cls[s][c], bb = b.cls[o][c];
             if (a | bb) emit(L.J + a * CLASS_NB + bb);
@@ -207,35 +204,32 @@ inline int threatClass(const Board& b) {
 template <class F>
 inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
     const auto& L = Layout::get();
+    const auto& T = LineTables::get();
     const int s = b.side - 1, o = 2 - b.side;
+    const int l1 = b.lastMove(0), l2 = b.lastMove(1);
     emit(L.PCS + b.code[s][c]);
     emit(L.PCO + b.code[o][c]);
-    if (g_useShape) emit(L.PSH + ShapeCanon::get().id[b.side == BLACK ? b.sh[c] : LineTables::get().swapKey[b.sh[c]]]);
+    emit(L.PSH + ShapeCanon::get().id[b.side == BLACK ? b.sh[c] : T.swapKey[b.sh[c]]]);
     emit(L.PJ + (tclass * CLASS_NB + b.cls[s][c]) * CLASS_NB + b.cls[o][c]);
-    emit(L.PD1 + distBucket(c, b.lastMove(0)));
-    emit(L.PD2 + distBucket(c, b.lastMove(1)));
+    emit(L.PD1 + distBucket(c, l1));
+    emit(L.PD2 + distBucket(c, l2));
     emit(L.PPSQ + orbitOf(c));
-    if (g_policyExt) {
-        const auto& LC = LineCanon::get(); const auto& T = LineTables::get();
-        for (int d = 0; d < 4; ++d) {
-            const uint16_t k = b.lkey[d][c];
-            if (keyHasStone(k)) emit(L.PLS + LC.id[b.side == BLACK ? k : T.swapKey[k]]);
-        }
-        const int r1 = relOffset(c, b.lastMove(0));
-        emit(L.PR1 + r1);
-        emit(L.PR2 + relOffset(c, b.lastMove(1)));
-        emit(L.PRS + r1 * CLASS_NB + b.cls[s][c]);
-        emit(L.PRO + r1 * CLASS_NB + b.cls[o][c]);
+    for (int d = 0; d < 4; ++d) {
+        const uint16_t k = b.lkey[d][c];
+        if (keyHasStone(k)) emit(L.PLS + LineCanon::get().id[b.side == BLACK ? k : T.swapKey[k]]);
     }
-    if (g_policyExt2) {
-        emit(L.PTC + tclass * CODE_NB + b.code[s][c]);
-        emit(L.PTO + tclass * CODE_NB + b.code[o][c]);
-        int d, k;
-        lineRel(c, b.lastMove(0), d, k);
-        if (d >= 0) emit(L.PL1 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
-        lineRel(c, b.lastMove(1), d, k);
-        if (d >= 0) emit(L.PL2 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
-    }
+    const int r1 = relOffset(c, l1);
+    emit(L.PR1 + r1);
+    emit(L.PR2 + relOffset(c, l2));
+    emit(L.PRS + r1 * CLASS_NB + b.cls[s][c]);
+    emit(L.PRO + r1 * CLASS_NB + b.cls[o][c]);
+    emit(L.PTC + tclass * CODE_NB + b.code[s][c]);
+    emit(L.PTO + tclass * CODE_NB + b.code[o][c]);
+    int d, k;
+    lineRel(c, l1, d, k);
+    if (d >= 0) emit(L.PL1 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
+    lineRel(c, l2, d, k);
+    if (d >= 0) emit(L.PL2 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
 }
 
 constexpr int TAPER_PLY = 120;

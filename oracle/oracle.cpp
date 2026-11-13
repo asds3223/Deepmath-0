@@ -1,22 +1,20 @@
 // oracle.cpp — Rapfi(태그 250615) 소스를 직접 링크한 "정답지" 도구
 //
-// 모드
-//   gen        Rapfi NNUE 정책 샘플링 롤아웃으로 국면을 만들고, NNUE 가치/정책(+선택적 탐색) 라벨을 붙인다.
-//              (우리 엔진 자가대국이 아니라 교사 모델이 두는 국면 분포 + 무작위 섭동)
-//              --sib-prob 로 일부 국면에서 형제 국면 묶음(상위 정책 수 + 무작위 수)을 함께 기록한다.
-//              형제 묶음은 "같은 부모에서 어느 자식이 더 나은가"를 NNUE 와 같게 판단하는지 재는 데 쓴다.
-//   label      기존 레코드(예: 우리 탐색 트리 리프 덤프)에 NNUE 가치/정책/탐색 라벨을 다시 붙인다.
-//   bench      NNUE 정적 평가·정책·탐색 처리량 측정 (데이터 예산 산정용)
-//   match      우리 고전평가 모델 vs Rapfi NNUE 단독(탐색 없음) 대국
-//              --ours greedy(1수 정적평가) | search(우리 alphabeta, --ms)
-//              --rapfi greedy(1수 NNUE 가치) | policy(NNUE 정책 1순위)
-//                      | mixed(Rapfi 탐색 내부와 같은 고전+NNUE 혼합 평가, PVS 식 창으로 1수 읽기)
-//                      | search(Rapfi 정상 탐색, --rapfi-ms 또는 --rapfi-nodes)
-//              우리 탐색: --ms 또는 --nodes
-//              즉승·상대 4 막기·즉패 회피 규칙은 양쪽에 동일 적용
+// 모드 (모두 --config config.toml 이 있는 폴더에서 실행)
+//   gen        Rapfi NNUE 정책 샘플링 롤아웃으로 국면 생성 + NNUE 가치/정책(+선택적 탐색) 라벨
+//              (교사 모델의 국면 분포 + 무작위 섭동, --sib-prob 로 형제 국면 묶음도 기록)
+//   label      기존 레코드(예: 리프 덤프)에 NNUE 가치/정책(--search-nodes 면 탐색 결과도) 라벨
+//   bench      NNUE 평가·정책·탐색 처리량
+//   match      우리 엔진 vs Rapfi
+//              --ours greedy(1수 정적평가) | search(우리 탐색: --ms 또는 --nodes, 설정은 ab::Config 필드 이름)
+//              --rapfi greedy(1수 NNUE 가치) | policy(정책 1순위) | mixed(Rapfi 혼합평가 1수) | search(--rapfi-nodes/--rapfi-ms)
+//              --rapfi-classical 1 (NNUE 떼고 Rapfi 고전평가만), --rapfi-off 기능목록 (Rapfi 탐색 기능 끄기, rapfi-ablate.patch)
+//              --diag 1 (우리 수마다 NNUE 기준 손해 분포)
+//   depthcmp   같은 국면·같은 노드 수에서 Rapfi 와 우리 엔진의 깊이 비교
 //
 // 병렬: 한 프로세스 = 한 코어. 대량 작업은 scripts/ 의 셸 스크립트가 코어 수만큼 프로세스를 띄운다.
 #include "../engine/eval.hpp"
+#include "../engine/params.hpp"
 #include "../engine/record.hpp"
 
 #include "command/command.h"
@@ -475,41 +473,9 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
         if (!(r.flags & (gmk::REC_SIBLING | gmk::REC_LEAF | gmk::REC_SELF_FIVE | gmk::REC_OPPO_FIVE)) && r.ply >= 4 &&
             r.ply <= 10 && std::fabs(r.nnWinrate() - 0.5f) < 0.2f) opens.push_back(r);
     ab::Searcher<gmk::Board> srch(64);
-    // 탐색 설정 (튜닝용)
-    srch.cfg.useQuiesce   = get(a, "q", 1) != 0;
-    srch.cfg.useRPS       = get(a, "rps", 1) != 0;
-    srch.cfg.usePolicyCut = get(a, "cut", 1) != 0;
-    srch.cfg.rpsPerLogit  = get(a, "rpsk", srch.cfg.rpsPerLogit);
-    srch.cfg.rpsMaxExtra  = get(a, "rpsmax", srch.cfg.rpsMaxExtra);
-    srch.cfg.cutGap       = get(a, "cutgap", srch.cfg.cutGap);
-    srch.cfg.cutMinKeep   = get(a, "cutkeep", srch.cfg.cutMinKeep);
-    srch.cfg.qMaxPly      = get(a, "qmax", srch.cfg.qMaxPly);
-    srch.cfg.orderPolicyW = get(a, "opw", srch.cfg.orderPolicyW);
-    srch.cfg.forcedCost   = get(a, "fcost", srch.cfg.forcedCost);
-    srch.cfg.aspDelta     = get(a, "asp", srch.cfg.aspDelta);
-    srch.cfg.qThreePly    = get(a, "qthree", srch.cfg.qThreePly);
-    srch.cfg.useVCF       = get(a, "vcf", 0) != 0;
-    srch.cfg.softTimePct  = get(a, "soft", srch.cfg.softTimePct);
-    srch.cfg.keepBase     = get(a, "keepbase", srch.cfg.keepBase);
-    srch.cfg.keepPerPly   = get(a, "keepply", srch.cfg.keepPerPly);
-    srch.cfg.gateDepth    = get(a, "gate", srch.cfg.gateDepth);
-    srch.cfg.gateMargin   = get(a, "gatemargin", srch.cfg.gateMargin);
-    gmk::g_tacSelf        = get(a, "tacself", gmk::g_tacSelf);
-    gmk::g_tacOppo        = get(a, "tacoppo", gmk::g_tacOppo);
-    srch.cfg.lmrDiv100    = get(a, "lmrdiv", srch.cfg.lmrDiv100);
-    srch.cfg.lmrBase100   = get(a, "lmrbase", srch.cfg.lmrBase100);
-    srch.cfg.useIIR       = get(a, "iir", 1) != 0;
-    srch.cfg.useImproving = get(a, "impr", 1) != 0;
-    srch.cfg.useCounter   = get(a, "cm", 1) != 0;
-    srch.cfg.rfpDepth     = get(a, "rfp", srch.cfg.rfpDepth);
-    srch.cfg.rfpMargin    = get(a, "rfpmargin", srch.cfg.rfpMargin);
-    srch.cfg.mcpBase      = get(a, "mcp", srch.cfg.mcpBase);
-    srch.cfg.mcpExp100    = get(a, "mcpexp", srch.cfg.mcpExp100);
-    srch.cfg.lmrAdditive  = get(a, "lmradd", srch.cfg.lmrAdditive) != 0;
+    ab::applyParams(srch.cfg, a);      // 우리 탐색 설정: ab::Config 필드 이름 (engine/params.hpp)
     const bool diag = get(a, "diag", 0) != 0 && get(a, "rapfi-classical", 0) == 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
-    gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);
-    gmk::g_vcfMaxPly      = get(a, "vcfply", gmk::g_vcfMaxPly);
     int win = 0, draw = 0, loss = 0; long moves = 0;
     for (int pi = 0; pi < pairs; ++pi) {
         const gmk::Record& o = opens[(size_t(offset) + size_t(pi) * stride * 7919) % opens.size()];
