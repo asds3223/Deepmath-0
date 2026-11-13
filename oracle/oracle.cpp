@@ -11,6 +11,8 @@
 //              --ours greedy(1수 정적평가) | search(우리 alphabeta, --ms)
 //              --rapfi greedy(1수 NNUE 가치) | policy(NNUE 정책 1순위)
 //                      | mixed(Rapfi 탐색 내부와 같은 고전+NNUE 혼합 평가, PVS 식 창으로 1수 읽기)
+//                      | search(Rapfi 정상 탐색, --rapfi-ms 또는 --rapfi-nodes)
+//              우리 탐색: --ms 또는 --nodes
 //              즉승·상대 4 막기·즉패 회피 규칙은 양쪽에 동일 적용
 //
 // 병렬: 한 프로세스 = 한 코어. 대량 작업은 scripts/ 의 셸 스크립트가 코어 수만큼 프로세스를 띄운다.
@@ -136,18 +138,22 @@ float rapfiClassicalWR(Pair& p) {
 }
 
 struct SearchOut { int best; float wr; int depth; };
+uint64_t g_rsNodes = 0, g_rsMoves = 0; double g_rsMs = 0;
 
-SearchOut rapfiSearch(Pair& p, uint64_t nodes) {
+SearchOut rapfiSearch(Pair& p, uint64_t nodes, int64_t turnMs = 0) {
     Search::SearchOptions opt;
     opt.rule = {Rule::FREESTYLE, GameRule::FREEOPEN};
     opt.infoMode = Search::SearchOptions::INFO_NONE;
     opt.disableOpeningQuery = true;
     opt.maxNodes = nodes;
     opt.maxDepth = 99;
+    if (turnMs > 0) opt.setTimeControl(turnMs, 0);
     Search::Threads.clear(false);
     Board snap(*p.plain, nullptr);
+    auto st = Clock::now();
     Search::Threads.startThinking(snap, opt, false);
     Search::Threads.waitForIdle();
+    g_rsMs += secondsSince(st) * 1000; g_rsNodes += Search::Threads.nodesSearched(); ++g_rsMoves;
     const auto& rm = Search::Threads.main()->rootMoves;
     SearchOut s{-1, 0.5f, 0};
     if (!rm.empty()) {
@@ -443,7 +449,10 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
     const bool oursSearch = get<std::string>(a, "ours", "greedy") == "search";
     const std::string rmode = get<std::string>(a, "rapfi", "greedy");
-    const bool rapfiPolicy = rmode == "policy", rapfiMixed = rmode == "mixed";
+    const bool rapfiPolicy = rmode == "policy", rapfiMixed = rmode == "mixed", rapfiSrch = rmode == "search";
+    const int64_t rms = get<int64_t>(a, "rapfi-ms", 0);
+    const uint64_t rnodes = get<uint64_t>(a, "rapfi-nodes", 0), onodes = get<uint64_t>(a, "nodes", 0);
+    uint64_t oNodes = 0, oMoves = 0; double oMs = 0;
     const int64_t ms = get<int64_t>(a, "ms", 100);
     const int pairs = get(a, "pairs", 20), offset = get(a, "offset", 0), stride = get(a, "stride", 1);
     std::vector<gmk::Record> recs, opens;
@@ -468,8 +477,16 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
                 const bool oursTurn = ob.side == oursColor;
                 int m;
                 if (oursTurn) {
-                    if (oursSearch) m = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, ms, 0}).bestMove;
+                    if (oursSearch) {
+                        ab::Result rr = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, onodes ? -1 : ms, onodes});
+                        m = rr.bestMove; oNodes += rr.nodes; oMs += double(rr.timeMs); ++oMoves;
+                    }
                     else m = pickOursGreedy(ob);
+                } else if (rapfiSrch) {
+                    // 강제수(즉승/4 막기)는 양쪽 동일 규칙, 그 외 Rapfi 정상 탐색
+                    const gmk::Model* keep = p.gb.model; p.gb.model = nullptr;
+                    int fm[gmk::NMOVES]; const int fn = p.gb.generate(fm); p.gb.model = keep;
+                    m = fn == 1 ? fm[0] : rapfiSearch(p, rnodes, rms).best;
                 } else m = rapfiMixed ? pickRapfiMixed(p) : pickRapfi(p, rapfiPolicy);
                 if (m < 0 || !ob.isEmptyMove(m)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { m = q; break; } }
                 p.move(m); ob.make(m); ++moves;
@@ -482,6 +499,8 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f nnue-used=%.3f\n", win, draw, loss,
                 win + draw + loss, double(moves) / std::max(1, win + draw + loss),
                 g_mixCalls ? double(g_mixNN) / g_mixCalls : -1.0);
+    if (oMoves) std::printf("  ours:  %.0f nodes/move, %.1f ms/move\n", double(oNodes) / oMoves, oMs / oMoves);
+    if (g_rsMoves) std::printf("  rapfi: %.0f nodes/move, %.1f ms/move\n", double(g_rsNodes) / g_rsMoves, g_rsMs / g_rsMoves);
     return 0;
 }
 
