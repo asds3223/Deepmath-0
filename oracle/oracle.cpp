@@ -10,6 +10,7 @@
 //   match      우리 고전평가 모델 vs Rapfi NNUE 단독(탐색 없음) 대국
 //              --ours greedy(1수 정적평가) | search(우리 alphabeta, --ms)
 //              --rapfi greedy(1수 NNUE 가치) | policy(NNUE 정책 1순위)
+//                      | mixed(Rapfi 탐색 내부와 같은 고전+NNUE 혼합 평가, PVS 식 창으로 1수 읽기)
 //              즉승·상대 4 막기·즉패 회피 규칙은 양쪽에 동일 적용
 //
 // 병렬: 한 프로세스 = 한 코어. 대량 작업은 scripts/ 의 셸 스크립트가 코어 수만큼 프로세스를 띄운다.
@@ -384,6 +385,36 @@ int pickOursGreedy(gmk::Board& b) {
     return best;
 }
 
+// Rapfi 혼합 평가(탐색 내부와 동일): Evaluation::evaluate<FREESTYLE>(board, alpha, beta)
+//   고전평가가 창 ± 여유폭 안이면 NNUE, 밖이면 고전평가 값을 그대로 쓴다.
+uint64_t g_mixCalls = 0, g_mixNN = 0;
+int pickRapfiMixed(Pair& p) {
+    const gmk::Model* keep = p.gb.model; p.gb.model = nullptr;
+    int mv[gmk::NMOVES], n = p.gb.generate(mv);
+    p.gb.model = keep;
+    if (n == 1) return mv[0];
+    int best = mv[0]; double bs = -1e18;
+    Value alpha = -VALUE_INFINITE, beta = VALUE_INFINITE;
+    for (int i = 0; i < n; ++i) {
+        p.move(mv[i]);
+        const int v = childVerdict(p.gb);
+        double sc;
+        if (v) sc = v * 1e9;
+        else {
+            // 첫 후보는 전체 창, 이후는 PVS 처럼 [alpha, alpha+1] 널 창 (자식 관점으로 뒤집어 전달)
+            const Value a = alpha, b = (i == 0) ? beta : Value(alpha + 1);
+            const Value cv = Evaluation::evaluate<Rule::FREESTYLE>(*p.rb, Value(-b), Value(-a));
+            const Value cls = Evaluation::evaluate<Rule::FREESTYLE>(*p.plain, Value(-b), Value(-a));
+            ++g_mixCalls; g_mixNN += (cv != cls);
+            sc = -double(cv);
+            if (Value(-cv) > alpha) alpha = Value(-cv);
+        }
+        p.undo();
+        if (sc > bs) { bs = sc; best = mv[i]; }
+    }
+    return best;
+}
+
 int pickRapfi(Pair& p, bool policy) {
     const gmk::Model* keep = p.gb.model; p.gb.model = nullptr;
     int mv[gmk::NMOVES], n = p.gb.generate(mv);
@@ -411,7 +442,8 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     gmk::Model mdl;
     if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
     const bool oursSearch = get<std::string>(a, "ours", "greedy") == "search";
-    const bool rapfiPolicy = get<std::string>(a, "rapfi", "greedy") == "policy";
+    const std::string rmode = get<std::string>(a, "rapfi", "greedy");
+    const bool rapfiPolicy = rmode == "policy", rapfiMixed = rmode == "mixed";
     const int64_t ms = get<int64_t>(a, "ms", 100);
     const int pairs = get(a, "pairs", 20), offset = get(a, "offset", 0), stride = get(a, "stride", 1);
     std::vector<gmk::Record> recs, opens;
@@ -438,7 +470,7 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
                 if (oursTurn) {
                     if (oursSearch) m = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, ms, 0}).bestMove;
                     else m = pickOursGreedy(ob);
-                } else m = pickRapfi(p, rapfiPolicy);
+                } else m = rapfiMixed ? pickRapfiMixed(p) : pickRapfi(p, rapfiPolicy);
                 if (m < 0 || !ob.isEmptyMove(m)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { m = q; break; } }
                 p.move(m); ob.make(m); ++moves;
                 if (ob.isLoss()) { result = oursTurn ? 1 : -1; break; }
@@ -447,8 +479,9 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
             (result > 0 ? win : result < 0 ? loss : draw)++;
         }
     }
-    std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f\n", win, draw, loss, win + draw + loss,
-                double(moves) / std::max(1, win + draw + loss));
+    std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f nnue-used=%.3f\n", win, draw, loss,
+                win + draw + loss, double(moves) / std::max(1, win + draw + loss),
+                g_mixCalls ? double(g_mixNN) / g_mixCalls : -1.0);
     return 0;
 }
 
