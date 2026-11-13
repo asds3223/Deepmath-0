@@ -13,11 +13,51 @@
 //
 // [정책]  p(c) = Σ w_i  (후보 칸마다; 수 정렬·실현확률 깊이·후보 컷에 사용)
 //   PCS/PCO 조합 코드, PSH 3x3 국소 모양, PJ (전역 전술 등급 25 × 칸 등급 결합), PD1/PD2 직전 수 거리, PPSQ 위치
+//   PLS  4방향 줄 모양 원형 (좌우 반전 동치)                    — 줄 위 미세한 모양 차이
+//   PR1/PR2  상대 직전 수 / 자기 직전 수까지의 상대 좌표 (9x9, 그 밖 1칸)
+//   PRS/PRO  상대 직전 수 상대 좌표 × 이 칸의 자기 / 상대 등급   — 응수 자리(막기·맞받기) 구분
 #pragma once
 #include "board.hpp"
 #include <algorithm>
 
 namespace gmk::feat {
+
+// 줄 키 정규화(정책 PLS 용): 벽이 바깥쪽부터 연속인 키만 유효, 좌우 반전 동치
+struct LineCanon {
+    int id[KEY_NB];
+    int count = 0;
+    static const LineCanon& get() { static const LineCanon c; return c; }
+private:
+    static bool validHalf(int k, bool left) {
+        bool seenNonWall = false;
+        for (int j = 0; j < 4; ++j) {
+            const int s = left ? j : 7 - j;
+            const int v = (k >> (2 * s)) & 3;
+            if (v == 3) { if (seenNonWall) return false; } else seenNonWall = true;
+        }
+        return true;
+    }
+    LineCanon() {
+        const auto& T = LineTables::get();
+        std::fill(id, id + KEY_NB, -1);
+        for (int k = 0; k < KEY_NB; ++k) {
+            if (!validHalf(k, true) || !validHalf(k, false)) continue;
+            const int c = std::min<int>(k, T.revKey[k]);
+            if (id[c] < 0) id[c] = count++;
+            id[k] = id[c];
+        }
+        for (int k = 0; k < KEY_NB; ++k) if (id[k] < 0) id[k] = 0;   // 실제로 나오지 않는 키
+    }
+};
+
+// 직전 수 기준 상대 좌표 (9x9 = 0..80, 그 밖·없음 = 81)
+inline int relOffset(int c, int m) {
+    if (m < 0) return 81;
+    const int q = toCell(m);
+    const int dx = cellX(c) - cellX(q), dy = cellY(c) - cellY(q);
+    if (dx < -4 || dx > 4 || dy < -4 || dy > 4) return 81;
+    return (dy + 4) * 9 + (dx + 4);
+}
 
 // 3x3 모양 정규화: 8 대칭 중 최소 키로 묶어 조밀한 id
 struct ShapeCanon {
@@ -47,7 +87,8 @@ private:
         }
     }
 };
-inline bool g_useShape = true;   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
+inline bool g_useShape = true;
+inline bool g_policyExt = true;  // 정책 확장 표(PLS/PR*) 사용   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
 
 inline int orbitOf(int c) {       // 15x15 D4 대칭 궤도 (36개)
     int x = cellX(c), y = cellY(c);
@@ -66,7 +107,7 @@ inline int distBucket(int c, int m) {
 
 struct Layout {
     int CS, CO, J, INIT, CNT, PSQ, SH, BIAS, PH, NV;      // value
-    int PCS, PCO, PSH, PJ, PD1, PD2, PPSQ, NP;                // policy
+    int PCS, PCO, PSH, PJ, PD1, PD2, PPSQ, PLS, PR1, PR2, PRS, PRO, NP;   // policy (새 표는 뒤에 붙인다)
     static const Layout& get() { static const Layout l; return l; }
 private:
     Layout() {
@@ -89,6 +130,11 @@ private:
         PD1 = o;  o += 5;
         PD2 = o;  o += 5;
         PPSQ = o; o += NORBIT;
+        PLS = o;  o += LineCanon::get().count;
+        PR1 = o;  o += 82;
+        PR2 = o;  o += 82;
+        PRS = o;  o += 82 * CLASS_NB;
+        PRO = o;  o += 82 * CLASS_NB;
         NP = o;
     }
 };
@@ -147,6 +193,18 @@ inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
     emit(L.PD1 + distBucket(c, b.lastMove(0)));
     emit(L.PD2 + distBucket(c, b.lastMove(1)));
     emit(L.PPSQ + orbitOf(c));
+    if (g_policyExt) {
+        const auto& LC = LineCanon::get(); const auto& T = LineTables::get();
+        for (int d = 0; d < 4; ++d) {
+            const uint16_t k = b.lkey[d][c];
+            if (keyHasStone(k)) emit(L.PLS + LC.id[b.side == BLACK ? k : T.swapKey[k]]);
+        }
+        const int r1 = relOffset(c, b.lastMove(0));
+        emit(L.PR1 + r1);
+        emit(L.PR2 + relOffset(c, b.lastMove(1)));
+        emit(L.PRS + r1 * CLASS_NB + b.cls[s][c]);
+        emit(L.PRO + r1 * CLASS_NB + b.cls[o][c]);
+    }
 }
 
 constexpr int TAPER_PLY = 120;

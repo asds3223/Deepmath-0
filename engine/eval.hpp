@@ -12,7 +12,7 @@ namespace gmk {
 
 class Model {
 public:
-    static constexpr uint32_t MAGIC = 0x44434535;   // "DCE5" (3x3 모양 표 추가)
+    static constexpr uint32_t MAGIC = 0x44434536;   // "DCE6" (정책 확장 표 추가)
     std::vector<float> wv;      // 가치: [2*i] 초반, [2*i+1] 후반
     std::vector<float> wp;      // 정책
     float scale    = 200.f;     // 탐색 정수 점수 = 로짓 × scale
@@ -76,10 +76,13 @@ public:
         if (!f) return false;
         const auto& L = feat::Layout::get();
         uint32_t h[3];
-        bool ok = std::fread(h, sizeof h, 1, f) == 1 && h[0] == MAGIC && h[1] == uint32_t(L.NV) && h[2] == uint32_t(L.NP) &&
+        // DCE5(정책 확장 표 이전) 도 읽는다: 정책 새 표는 뒤에 붙었으므로 앞부분만 채우고 나머지는 0
+        bool ok = std::fread(h, sizeof h, 1, f) == 1 && (h[0] == MAGIC || h[0] == 0x44434535u) &&
+                  h[1] == uint32_t(L.NV) && h[2] <= uint32_t(L.NP) && (h[0] != MAGIC || h[2] == uint32_t(L.NP)) &&
                   std::fread(&scale, sizeof scale, 1, f) == 1 &&
                   std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
-                  std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
+                  std::fread(wp.data(), sizeof(float), h[2], f) == h[2];
+        if (ok) std::fill(wp.begin() + h[2], wp.end(), 0.f);
         std::fclose(f);
         if (ok) quantize();
         return ok;
@@ -258,7 +261,17 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
         for (int i = 0; i < n; ++i) {
             const int c = cells[out[i]];
             const int shp = feat::g_useShape ? q[L.PSH + feat::ShapeCanon::get().id[side == BLACK ? sh[c] : LineTables::get().swapKey[sh[c]]]] : 0;
-            score[i] = shp + q[L.PCS + code[s][c]] + q[L.PCO + code[o][c]] + q[L.PPSQ + orb[c]] + pj[cls[s][c] * CLASS_NB + cls[o][c]] + q[L.PD1 + feat::distBucket(c, l1)] + q[L.PD2 + feat::distBucket(c, l2)];
+            int ext = 0;
+            if (feat::g_policyExt) {
+                const auto& LC = feat::LineCanon::get(); const auto& T = LineTables::get();
+                for (int d = 0; d < 4; ++d) {
+                    const uint16_t k = lkey[d][c];
+                    if (keyHasStone(k)) ext += q[L.PLS + LC.id[side == BLACK ? k : T.swapKey[k]]];
+                }
+                const int r1 = feat::relOffset(c, l1);
+                ext += q[L.PR1 + r1] + q[L.PR2 + feat::relOffset(c, l2)] + q[L.PRS + r1 * CLASS_NB + cls[s][c]] + q[L.PRO + r1 * CLASS_NB + cls[o][c]];
+            }
+            score[i] = ext + shp + q[L.PCS + code[s][c]] + q[L.PCO + code[o][c]] + q[L.PPSQ + orb[c]] + pj[cls[s][c] * CLASS_NB + cls[o][c]] + q[L.PD1 + feat::distBucket(c, l1)] + q[L.PD2 + feat::distBucket(c, l2)];
         }
     } else {
         for (int i = 0; i < n; ++i) {

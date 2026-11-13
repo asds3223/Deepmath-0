@@ -52,6 +52,7 @@ struct Opts {
     float lambda; bool value, policy;
     float wbal;    // 균형 국면 가중치: w = 1 + wbal * 4p(1-p)
     float pairW;   // 형제 순위 손실 가중치 (같은 부모의 자식 간 NNUE 우열 순서를 직접 맞춤)
+    float pbal;    // 정책 손실 균형 가중치: w = 1 + pbal * 4p(1-p)
 };
 using Item = std::pair<uint32_t, uint32_t>;   // (시작 인덱스, 개수) — 형제 묶음은 한 아이템
 
@@ -103,8 +104,9 @@ void accumulate(const Model& mdl, const Record* recs, const Item* items, size_t 
                     float mx = -1e30f;
                     for (int c = 0; c < nc; ++c) { sc[c] = mdl.policyScore(b, toCell(moves[c]), tc); mx = std::max(mx, sc[c]); }
                     double z = 0; for (int c = 0; c < nc; ++c) z += std::exp(sc[c] - mx);
+                    const float pw = 1 + o.pbal * 4 * pt[i] * (1 - pt[i]);
                     for (int c = 0; c < nc; ++c) {
-                        const float pr = float(std::exp(sc[c] - mx) / z), gp = pr - tgt[c];
+                        const float pr = float(std::exp(sc[c] - mx) / z), gp = pw * (pr - tgt[c]);
                         if (tgt[c] > 0) g.ploss += -tgt[c] * std::log(std::max(pr, 1e-9f));
                         if (gp != 0) mdl.forPolicy(b, toCell(moves[c]), tc, [&](int f) { g.gp[f] += gp; });
                     }
@@ -145,7 +147,7 @@ int main(int argc, char** argv) {
     const float  l2       = float(argf(a, "l2", 1e-6));
     const float  valFrac  = float(argf(a, "val-frac", 0.05));
     Opts o{float(argf(a, "lambda", 0.0)), argf(a, "value", 1) != 0, argf(a, "policy", 1) != 0,
-           float(argf(a, "wbal", 0.0)), float(argf(a, "pair", 0.0))};
+           float(argf(a, "wbal", 0.0)), float(argf(a, "pair", 0.0)), float(argf(a, "pbal", 0.0))};
 
     std::vector<Record> recs, val;
     for (auto& f : dataFiles) if (!readRecords(f, recs)) { std::fprintf(stderr, "cannot read %s\n", f.c_str()); return 1; }
@@ -164,6 +166,7 @@ int main(int argc, char** argv) {
     Model mdl;
     mdl.scale = float(argf(a, "scale", 200));
     feat::g_useShape = argf(a, "shape", 1) != 0;
+    feat::g_policyExt = argf(a, "pext", 1) != 0;
     if (a.count("init") && !mdl.load(a["init"])) { std::fprintf(stderr, "cannot load init model\n"); return 1; }
     Adam av, ap; av.init(mdl.wv.size()); ap.init(mdl.wp.size());
     std::vector<Grad> grads(threads);

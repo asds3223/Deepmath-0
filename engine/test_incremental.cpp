@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
                 const int tc = feat::threatClass(b);
                 for (int i = 0; i < k; ++i) {
                     const int f = int(std::lround(mdl.policyScore(b, toCell(out[i]), tc) * 256));
-                    maxPol = std::max(maxPol, std::abs(sc[i] - f)); polBad += std::abs(sc[i] - f) > 4;
+                    maxPol = std::max(maxPol, std::abs(sc[i] - f)); polBad += std::abs(sc[i] - f) > 8;   // 항이 많아 반올림 누적 (8/256 로짓)
                 }
             }
             ++checks;
