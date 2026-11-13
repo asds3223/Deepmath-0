@@ -163,14 +163,7 @@ int main(int argc, char** argv) {
 
     Model mdl;
     mdl.scale = float(argf(a, "scale", 200));
-    mdl.compact = argf(a, "compact", 0) != 0;
     if (a.count("init") && !mdl.load(a["init"])) { std::fprintf(stderr, "cannot load init model\n"); return 1; }
-    {
-        size_t nzv = 0; const auto& L2 = feat::Layout::get();
-        std::printf("feature set: %s (active value params ≈ %d x2, policy ≈ %d)\n", mdl.compact ? "compact(Yixin-style)" : "full",
-                    mdl.compact ? L2.NV - 3 * L2.NC : L2.NV, mdl.compact ? L2.NP - L2.NC : L2.NP);
-        (void)nzv;
-    }
     Adam av, ap; av.init(mdl.wv.size()); ap.init(mdl.wp.size());
     std::vector<Grad> grads(threads);
     // 아이템 구성: 연속된 같은 그룹의 형제 국면은 한 묶음으로 (셔플해도 함께 다님)

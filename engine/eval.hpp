@@ -1,6 +1,7 @@
 // eval.hpp — 증류된 고전 평가 모델 (가치 + 정책) 및 Board::evaluate / Board::generate
 #pragma once
 #include "features.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -10,19 +11,14 @@ namespace gmk {
 
 class Model {
 public:
-    static constexpr uint32_t MAGIC = 0x44434533;   // "DCE3"
+    static constexpr uint32_t MAGIC = 0x44434534;   // "DCE4"
     std::vector<float> wv;      // 가치: [2*i] 초반, [2*i+1] 후반
     std::vector<float> wp;      // 정책
     float scale    = 200.f;     // 탐색 정수 점수 = 로짓 × scale
     int   maxCands = 0;         // >0 이면 정책 상위 N 개로 후보 제한 (기본 OFF)
-    bool  compact  = false;     // Yixin 식 압축형 (라인 모양 원형 표 미사용)
 
-    template <class F> void forValue(const Board& b, F&& f) const {
-        if (compact) feat::valueFeatures<true>(b, f); else feat::valueFeatures<false>(b, f);
-    }
-    template <class F> void forPolicy(const Board& b, int c, int tc, F&& f) const {
-        if (compact) feat::policyFeatures<true>(b, c, tc, f); else feat::policyFeatures<false>(b, c, tc, f);
-    }
+    template <class F> void forValue(const Board& b, F&& f) const { feat::valueFeatures(b, f); }
+    template <class F> void forPolicy(const Board& b, int c, int tc, F&& f) const { feat::policyFeatures(b, c, tc, f); }
 
     Model() { const auto& L = feat::Layout::get(); wv.assign(2 * size_t(L.NV), 0.f); wp.assign(L.NP, 0.f); }
 
@@ -44,7 +40,7 @@ public:
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) return false;
         const auto& L = feat::Layout::get();
-        uint32_t h[5] = {MAGIC, uint32_t(L.NV), uint32_t(L.NP), uint32_t(L.NC), uint32_t(compact)};
+        uint32_t h[3] = {MAGIC, uint32_t(L.NV), uint32_t(L.NP)};
         std::fwrite(h, sizeof h, 1, f);
         std::fwrite(&scale, sizeof scale, 1, f);
         std::fwrite(wv.data(), sizeof(float), wv.size(), f);
@@ -56,15 +52,12 @@ public:
         FILE* f = std::fopen(path.c_str(), "rb");
         if (!f) return false;
         const auto& L = feat::Layout::get();
-        uint32_t h[5] = {0, 0, 0, 0, 0};
-        bool ok = std::fread(h, sizeof(uint32_t), 4, f) == 4 && (h[0] == MAGIC || h[0] == 0x44434532u) &&
-                  h[1] == uint32_t(L.NV) && h[2] == uint32_t(L.NP) && h[3] == uint32_t(L.NC);
-        if (ok && h[0] == MAGIC) ok = std::fread(&h[4], sizeof(uint32_t), 1, f) == 1;   // DCE2 는 compact 필드 없음
-        ok = ok && std::fread(&scale, sizeof scale, 1, f) == 1 &&
-             std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
-             std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
+        uint32_t h[3];
+        bool ok = std::fread(h, sizeof h, 1, f) == 1 && h[0] == MAGIC && h[1] == uint32_t(L.NV) && h[2] == uint32_t(L.NP) &&
+                  std::fread(&scale, sizeof scale, 1, f) == 1 &&
+                  std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
+                  std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
         std::fclose(f);
-        compact = ok && h[4] != 0;
         return ok;
     }
 };
@@ -103,9 +96,15 @@ inline int Board::generate(int* out) const {
     }
     float sc[NMOVES];
     const int tc = model ? feat::threatClass(*this) : 0;
+    if (oppThreat()) {                                   // 위협 상태: 방어수만 (정렬 생략)
+        const int nd = defenseMoves(out);
+        if (nd > 0) return nd;
+    }
+    const int nd = 0; const int* defs = out; const bool onlyDef = false;
     for (int m = 0; m < NMOVES; ++m) {
         const int c = cells[m];
         if (!isCandidate(c)) continue;
+        if (onlyDef && std::find(defs, defs + nd, m) == defs + nd) continue;
         sc[n] = model ? model->policyScore(*this, c, tc)
                       : float(heuristicClassScore(cls[s][c]) * 2 + heuristicClassScore(cls[o][c]));
         out[n++] = m;
@@ -117,6 +116,82 @@ inline int Board::generate(int* out) const {
         sc[j + 1] = x; out[j + 1] = mv;
     }
     if (model && model->maxCands > 0 && n > model->maxCands) n = model->maxCands;
+    return n;
+}
+
+// 탐색용: 정렬하지 않은 후보 + 정책 점수(로짓×256) + 전술 수 표시
+//   전술 수 = 자기가 쌍삼 이상(4 포함)을 만들거나 상대의 쌍삼 이상 급소를 막는 수 → 감축·컷 대상에서 제외
+inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const {
+    if (ply == 0) { out[0] = (BS / 2) * BS + BS / 2; score[0] = 0; tactical[0] = 1; return 1; }
+    const int s = side - 1, o = 2 - side;
+    const int* cells = feat::boardCells();
+    if (clsCnt[s][C_FIVE]) {
+        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == C_FIVE) { out[0] = m; score[0] = 0; tactical[0] = 1; return 1; }
+    }
+    int n = 0;
+    if (clsCnt[o][C_FIVE]) {
+        for (int m = 0; m < NMOVES; ++m)
+            if (cell[cells[m]] == EMPTY && cls[o][cells[m]] == C_FIVE) { out[n] = m; score[n] = 0; tactical[n] = 1; ++n; }
+        return n;
+    }
+    const int tc = model ? feat::threatClass(*this) : 0;
+    int defs[NMOVES], nd = 0;
+    if (oppThreat()) nd = defenseMoves(defs);           // 위협 상태: 방어수/맞받기 4 만
+    for (int m = 0; m < NMOVES; ++m) {
+        const int c = cells[m];
+        if (!isCandidate(c)) continue;
+        if (nd && std::find(defs, defs + nd, m) == defs + nd) continue;
+        const float sc = model ? model->policyScore(*this, c, tc)
+                               : float(heuristicClassScore(cls[s][c]) * 2 + heuristicClassScore(cls[o][c])) * 0.05f;
+        out[n] = m;
+        score[n] = int(sc * 256);
+        tactical[n] = nd > 0 || cls[s][c] >= C_DOUBLE3 || cls[o][c] >= C_DOUBLE3;
+        ++n;
+    }
+    return n;
+}
+
+// 위협 상태의 방어수: 실제로 두어 보고 상대의 4-3/승리 4 급소가 모두 사라지는 수 + 우리 4(맞받기)
+inline int Board::defenseMoves(int* out) const {
+    Board& b = const_cast<Board&>(*this);                // make/undo 는 상태를 정확히 복원한다
+    const int s = side - 1, o = 2 - side;
+    const int* cells = feat::boardCells();
+    // 시험 후보: 상대 위협 칸(4-3/승리 4)을 지나는 4방향 줄 ±4 칸 (+ 우리 4 맞받기는 별도)
+    bool mark[CELLS] = {};
+    for (int m = 0; m < NMOVES; ++m) {
+        const int t = cells[m];
+        if (cell[t] != EMPTY || (cls[o][t] != C_FOUR3 && cls[o][t] != C_WINFOUR)) continue;
+        mark[t] = true;
+        for (int d = 0; d < 4; ++d)
+            for (int k = -4; k <= 4; ++k) { const int q = t + k * DIRS[d]; if (cell[q] == EMPTY) mark[q] = true; }
+    }
+    int n = 0;
+    for (int m = 0; m < NMOVES; ++m) {
+        const int c = cells[m];
+        if (cell[c] != EMPTY) continue;
+        if (cls[s][c] >= C_FOUR) { out[n++] = m; continue; }       // 4 로 맞받기 (상대는 막아야 함)
+        if (!mark[c]) continue;
+        b.make(m);
+        const bool ok = b.clsCnt[o][C_FOUR3] + b.clsCnt[o][C_WINFOUR] == 0;
+        b.undo(m);
+        if (ok) out[n++] = m;
+    }
+    return n;
+}
+
+// 정지 탐색 공격수: 4 를 만드는 수 (승리 4 → 4-3 → 4+ → 4), allowThree 면 열린 3 을 만드는 수도
+inline int Board::forcingMoves(int* out, bool allowThree) const {
+    const int s = side - 1;
+    const int* S = clsCnt[s];
+    const int lo = allowThree ? C_OPEN3 : C_FOUR;
+    int any = 0; for (int k = lo; k <= C_WINFOUR; ++k) any += S[k];
+    if (!any) return 0;
+    const int* cells = feat::boardCells();
+    int n = 0;
+    for (int k = C_WINFOUR; k >= lo; --k) {
+        if (!S[k] || k == C_THREE || k == C_THREE_PLUS) continue;
+        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == k) out[n++] = m;
+    }
     return n;
 }
 

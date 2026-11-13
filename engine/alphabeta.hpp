@@ -15,8 +15,17 @@
 //
 // 선택 인터페이스 (있으면 자동 사용, 없으면 기존 동작과 완전히 동일):
 //   bool leafProbe(int ply, int& score) const;
-//       리프에서 정확히 판정 가능한 전술 상황(즉승, 막을 수 없는 쌍사 등)이면 true 와
-//       루트 기준 메이트 점수를 돌려준다. VCF/위협 탐색 같은 정지 탐색도 이 자리에 붙인다.
+//       리프에서 정확히 판정 가능한 전술 상황(즉승, 막을 수 없는 쌍사 등)이면 true 와 메이트 점수.
+//   int  generateScored(int* out, int* score, uint8_t* tactical) const;
+//       정렬하지 않은 후보 + 정책 점수(로짓×256) + 전술 수 표시. 있으면 다음을 쓴다:
+//         · 수 정렬: TT/킬러 다음, 히스토리 + 정책 점수
+//         · 실현 확률 깊이: 정책 1위와의 로짓 차이만큼 깊이를 더 소모 (전술 수는 감축 없음)
+//         · 정책 간격 컷: 1위와 차이가 너무 큰 비전술 수는 탐색하지 않음 (루트 제외)
+//   bool mustDefend() const;  int forcingMoves(int* out, bool allowThree) const;
+//       있으면 리프에서 정지 탐색: 위협을 받지 않으면 현재 평가를 기준값(stand-pat)으로 두고
+//       강제수(4 만들기, 앞쪽 몇 수는 열린 3 만들기 포함)만, 위협을 받으면 기준값 없이 방어수만 읽는다.
+//
+// 깊이는 내부적으로 1수 = ONE_PLY 단위(정수)로 다룬다.
 #pragma once
 #include <algorithm>
 #include <atomic>
@@ -37,11 +46,21 @@ constexpr int NO_MOVE    = -1;
 
 enum Bound : uint8_t { BOUND_NONE = 0, BOUND_UPPER = 1, BOUND_LOWER = 2, BOUND_EXACT = 3 };
 
+constexpr int ONE_PLY    = 4;
+
 namespace detail {
 template <class P, class = void> struct HasLeafProbe : std::false_type {};
 template <class P>
 struct HasLeafProbe<P, std::void_t<decltype(std::declval<const P&>().leafProbe(0, std::declval<int&>()))>>
     : std::true_type {};
+template <class P, class = void> struct HasScored : std::false_type {};
+template <class P>
+struct HasScored<P, std::void_t<decltype(std::declval<const P&>().generateScored((int*)nullptr, (int*)nullptr, (uint8_t*)nullptr))>>
+    : std::true_type {};
+template <class P, class = void> struct HasQuiesce : std::false_type {};
+template <class P>
+struct HasQuiesce<P, std::void_t<decltype(std::declval<const P&>().forcingMoves((int*)nullptr, false)),
+                                 decltype(std::declval<const P&>().mustDefend())>> : std::true_type {};
 } // namespace detail
 
 // ───────────────────────── 전치표 ─────────────────────────
@@ -111,6 +130,20 @@ struct Config {
     int  aspDelta      = 40;    // 평가 스케일에 맞춰 조정
     // LMR 은 기본 OFF. 오목류에서 켤 때는 강제수(4, 열린 3 등)를 감축 대상에서 반드시 제외할 것.
     bool useLMR        = false;
+
+    // ── generateScored 가 있을 때 (기본값: 15x15 프리스타일 튜닝 결과, 2026-11 1차) ──
+    int  orderPolicyW  = 4;     // 정렬 점수 = 히스토리 + orderPolicyW × 정책(로짓×256) / 256 × 64
+    bool useRPS        = true;  // 실현 확률 깊이
+    int  rpsPerLogit   = 6;     // 로짓 1 차이당 추가 소모 깊이 (ONE_PLY 단위의 1/4 = 1)
+    int  rpsMaxExtra   = 8;     // 추가 소모 상한 (단위)
+    int  forcedCost    = 2;     // 수가 하나뿐일 때 소모 깊이 (ONE_PLY 보다 작으면 사실상 연장)
+    bool usePolicyCut  = true;
+    int  cutGap        = 1;     // 정책 1위와 로짓 차이가 이보다 크면 비전술 수는 생략
+    int  cutMinKeep    = 3;     // 최소 이만큼은 탐색
+    // ── mustDefend/forcingMoves 가 있을 때 ──
+    bool useQuiesce    = true;
+    int  qMaxPly       = 6;
+    int  qThreePly     = 0;     // 정지 탐색 앞쪽 몇 수까지 열린 3 공격을 포함할지
 };
 
 struct Result {
@@ -161,7 +194,7 @@ public:
                 beta  = std::min(prev + delta, INF);
             }
             for (;;) {
-                s = search(pos, alpha, beta, d, 0);
+                s = search(pos, alpha, beta, d * ONE_PLY, 0);
                 if (stopped_) break;
                 if      (s <= alpha) alpha = std::max(s - delta, -INF);   // fail-low → 아래로 확장
                 else if (s >= beta)  beta  = std::min(s + delta, INF);    // fail-high → 위로 확장
@@ -226,9 +259,11 @@ private:
         }
 
         if (depth <= 0 || ply >= MAX_PLY - 1) {          // ← 리프
+            if constexpr (detail::HasQuiesce<P>::value)
+                if (cfg.useQuiesce && ply < MAX_PLY - 1) return qsearch(pos, alpha, beta, ply, 0);
             if constexpr (detail::HasLeafProbe<P>::value) {
                 int s;
-                if (pos.leafProbe(ply, s)) return s;     // 정확한 전술 판정 / 정지 탐색 자리
+                if (pos.leafProbe(ply, s)) return s;     // 정확한 전술 판정
             }
             return pos.evaluate();
         }
@@ -252,16 +287,27 @@ private:
         // ── 수 생성 및 정렬 점수 ──
         int moves[P::NUM_MOVES];
         int order[P::NUM_MOVES];
-        const int n = pos.generate(moves);
+        int pscore[P::NUM_MOVES];
+        uint8_t tac[P::NUM_MOVES];
+        constexpr bool scored = detail::HasScored<P>::value;
+        int n, smax = 0;
+        if constexpr (scored) {
+            n = pos.generateScored(moves, pscore, tac);
+            if (n > 0) { smax = pscore[0]; for (int i = 1; i < n; ++i) smax = std::max(smax, pscore[i]); }
+        } else {
+            n = pos.generate(moves);
+        }
         if (n == 0) return 0;
 
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
             const int m = moves[i];
+            int base = history_[side][m];
+            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
-                     : history_[side][m];
+                     : std::min(base, (1 << 28));
         }
 
         const int alpha0 = alpha;
@@ -272,22 +318,41 @@ private:
             int bi = i;
             for (int j = i + 1; j < n; ++j) if (order[j] > order[bi]) bi = j;
             const int m = moves[bi], mOrder = order[bi];
+            int mScore = 0; uint8_t mTac = 0;
+            if constexpr (scored) {
+                mScore = pscore[bi]; mTac = tac[bi];
+                for (int j = bi; j > i; --j) { pscore[j] = pscore[j - 1]; tac[j] = tac[j - 1]; }
+                pscore[i] = mScore; tac[i] = mTac;
+            }
             for (int j = bi; j > i; --j) { moves[j] = moves[j - 1]; order[j] = order[j - 1]; }
             moves[i] = m; order[i] = mOrder;
+
+            // 이 수가 소모할 깊이 (기본 1수, 실현 확률 깊이면 정책 차이만큼 추가)
+            int extra = 0, cost = ONE_PLY;
+            if constexpr (scored) {
+                const int gap = (smax - mScore) / 256;          // 로짓 차이 (정수부)
+                if (n == 1) cost = cfg.forcedCost;
+                else if (!mTac && mOrder < (1 << 29) - 1) {
+                    if (cfg.usePolicyCut && !root && i >= cfg.cutMinKeep && gap > cfg.cutGap) continue;
+                    if (cfg.useRPS) extra = std::min(cfg.rpsMaxExtra, (smax - mScore) * cfg.rpsPerLogit / 256);
+                }
+            }
 
             pos.make(m);
             int s;
             if (i == 0) {
-                s = -search(pos, -beta, -alpha, depth - 1, ply + 1);
+                s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
+                if (extra && s > alpha) s = -search(pos, -beta, -alpha, depth - cost, ply + 1);
             } else {
                 int r = 0;
-                if (cfg.useLMR && depth >= 3 && i >= 4 && mOrder < (1 << 29) - 1)
-                    r = 1 + (i >= 12);
-                s = -search(pos, -alpha - 1, -alpha, depth - 1 - r, ply + 1);      // 널 윈도우
+                if (cfg.useLMR && depth >= 3 * ONE_PLY && i >= 4 && mOrder < (1 << 29) - 1)
+                    r = (1 + (i >= 12)) * ONE_PLY;
+                r = std::max(r, extra);
+                s = -search(pos, -alpha - 1, -alpha, depth - cost - r, ply + 1);      // 널 윈도우
                 if (r && s > alpha)
-                    s = -search(pos, -alpha - 1, -alpha, depth - 1, ply + 1);      // 감축 없이 재탐색
+                    s = -search(pos, -alpha - 1, -alpha, depth - cost, ply + 1);      // 감축 없이 재탐색
                 if (s > alpha && s < beta)
-                    s = -search(pos, -beta, -alpha, depth - 1, ply + 1);           // 풀 윈도우 재탐색
+                    s = -search(pos, -beta, -alpha, depth - cost, ply + 1);           // 풀 윈도우 재탐색
             }
             pos.undo(m);
             if (stopped_) return 0;
@@ -303,7 +368,7 @@ private:
                     if (s >= beta) {                     // 베타 컷
                         if (killers_[ply][0] != m) { killers_[ply][1] = killers_[ply][0]; killers_[ply][0] = m; }
                         int& h = history_[side][m];
-                        h += depth * depth;
+                        h += (depth * depth) / (ONE_PLY * ONE_PLY) + 1;
                         if (h > (1 << 28)) for (auto& sd : history_) for (int& x : sd) x /= 2;
                         break;
                     }
@@ -313,7 +378,52 @@ private:
 
         if (cfg.useTT) {
             const Bound b = best >= beta ? BOUND_LOWER : best > alpha0 ? BOUND_EXACT : BOUND_UPPER;
-            tt.store(key, scoreToTT(best, ply), bestMove, depth, b);
+            tt.store(key, scoreToTT(best, ply), bestMove, std::min(depth, 127), b);
+        }
+        return best;
+    }
+
+    // 정지 탐색: stand-pat + 강제수(4)와 강제 방어만
+    int qsearch(P& pos, int alpha, int beta, int ply, int qply) {
+        pvLen_[ply] = 0;
+        if (checkStop()) return 0;
+        ++nodes_;
+        if (pos.isLoss()) return -MATE + ply;
+        if (pos.isDraw()) return 0;
+        if constexpr (detail::HasLeafProbe<P>::value) {
+            int s;
+            if (pos.leafProbe(ply, s)) return s;
+        }
+        if (ply >= MAX_PLY - 1) return pos.evaluate();
+        int moves[P::NUM_MOVES], n, best;
+        const bool defend = pos.mustDefend();
+        if (defend) {
+            if (qply >= cfg.qMaxPly) return pos.evaluate();
+            n = pos.generate(moves);            // 방어수(와 맞받기 4)만 나온다
+            best = -INF;
+            if (n == 0) return -(MATE - ply - 3);
+        } else {
+            const int stand = pos.evaluate();
+            if (stand >= beta || qply >= cfg.qMaxPly) return stand;
+            if (stand > alpha) alpha = stand;
+            best = stand;
+            n = pos.forcingMoves(moves, qply < cfg.qThreePly);
+        }
+        for (int i = 0; i < n; ++i) {
+            pos.make(moves[i]);
+            const int s = -qsearch(pos, -beta, -alpha, ply + 1, qply + 1);
+            pos.undo(moves[i]);
+            if (stopped_) return 0;
+            if (s > best) {
+                best = s;
+                if (s > alpha) {
+                    alpha = s;
+                    pv_[ply][0] = moves[i];
+                    std::memcpy(pv_[ply] + 1, pv_[ply + 1], pvLen_[ply + 1] * sizeof(int));
+                    pvLen_[ply] = pvLen_[ply + 1] + 1;
+                    if (s >= beta) break;
+                }
+            }
         }
         return best;
     }

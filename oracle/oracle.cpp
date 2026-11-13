@@ -461,6 +461,19 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
         if (!(r.flags & (gmk::REC_SIBLING | gmk::REC_LEAF | gmk::REC_SELF_FIVE | gmk::REC_OPPO_FIVE)) && r.ply >= 4 &&
             r.ply <= 10 && std::fabs(r.nnWinrate() - 0.5f) < 0.2f) opens.push_back(r);
     ab::Searcher<gmk::Board> srch(64);
+    // 탐색 설정 (튜닝용)
+    srch.cfg.useQuiesce   = get(a, "q", 1) != 0;
+    srch.cfg.useRPS       = get(a, "rps", 1) != 0;
+    srch.cfg.usePolicyCut = get(a, "cut", 1) != 0;
+    srch.cfg.rpsPerLogit  = get(a, "rpsk", srch.cfg.rpsPerLogit);
+    srch.cfg.rpsMaxExtra  = get(a, "rpsmax", srch.cfg.rpsMaxExtra);
+    srch.cfg.cutGap       = get(a, "cutgap", srch.cfg.cutGap);
+    srch.cfg.cutMinKeep   = get(a, "cutkeep", srch.cfg.cutMinKeep);
+    srch.cfg.qMaxPly      = get(a, "qmax", srch.cfg.qMaxPly);
+    srch.cfg.orderPolicyW = get(a, "opw", srch.cfg.orderPolicyW);
+    srch.cfg.forcedCost   = get(a, "fcost", srch.cfg.forcedCost);
+    srch.cfg.aspDelta     = get(a, "asp", srch.cfg.aspDelta);
+    srch.cfg.qThreePly    = get(a, "qthree", srch.cfg.qThreePly);
     int win = 0, draw = 0, loss = 0; long moves = 0;
     for (int pi = 0; pi < pairs; ++pi) {
         const gmk::Record& o = opens[(size_t(offset) + size_t(pi) * stride * 7919) % opens.size()];

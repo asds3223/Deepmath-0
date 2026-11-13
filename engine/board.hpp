@@ -107,7 +107,16 @@ public:
     bool isLoss() const { return ply > 0 && fiveMade[ply - 1]; }
     bool isDraw() const { return ply >= NMOVES; }
     int  evaluate() const;            // eval.hpp
-    int  generate(int* out) const;    // eval.hpp
+    int  generate(int* out) const;    // eval.hpp (정책 순 정렬)
+    int  generateScored(int* out, int* score, uint8_t* tactical) const;   // eval.hpp (정렬 없음, 탐색용)
+    // ── 위협 상태 ──
+    // 상대가 다음 수에 5목(=4 를 막아야 함) 또는 4-3/승리 4 를 만들 수 있으면 "위협 상태".
+    // 위협 상태에서는 위협을 실제로 없애는 수와 우리 4(맞받기)만 의미가 있다 (체스의 체크 회피와 같은 취급).
+    bool oppFive() const   { return clsCnt[2 - side][C_FIVE] > 0; }
+    bool oppThreat() const { const int* O = clsCnt[2 - side]; return O[C_FOUR3] + O[C_WINFOUR] > 0; }
+    bool mustDefend() const { return oppFive(); }                           // 정지 탐색 강제 방어: 상대 4 만
+    int  defenseMoves(int* out) const;                                     // eval.hpp
+    int  forcingMoves(int* out, bool allowThree) const;                    // eval.hpp: 4 (+열린 3) 만드는 수
 
     // 리프에서 정확히 판정 가능한 전술 상황
     bool leafProbe(int plyFromRoot, int& score) const {

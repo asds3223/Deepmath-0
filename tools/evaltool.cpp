@@ -63,7 +63,12 @@ int main(int argc, char** argv) {
         const uint64_t nodes = uint64_t(num(a, "nodes", 0));
         const int64_t ms = int64_t(num(a, "ms", -1));
         ab::Searcher<Board> s(size_t(num(a, "tt-mb", 64)));
+        s.cfg.useQuiesce = num(a, "q", 1) != 0; s.cfg.useRPS = num(a, "rps", 1) != 0; s.cfg.usePolicyCut = num(a, "cut", 1) != 0;
+        s.cfg.qThreePly = int(num(a, "qthree", s.cfg.qThreePly)); s.cfg.qMaxPly = int(num(a, "qmax", s.cfg.qMaxPly));
+        s.cfg.cutGap = int(num(a, "cutgap", s.cfg.cutGap)); s.cfg.cutMinKeep = int(num(a, "cutkeep", s.cfg.cutMinKeep));
+        s.cfg.rpsPerLogit = int(num(a, "rpsk", s.cfg.rpsPerLogit)); s.cfg.rpsMaxExtra = int(num(a, "rpsmax", s.cfg.rpsMaxExtra));
         size_t n = 0, agree = 0, verdictAgree = 0; double depthSum = 0, nodeSum = 0, msSum = 0;
+        size_t rWin = 0, rWinFound = 0, rLoss = 0, rLossFound = 0;
         for (const Record& r : recs) {
             if (!(r.flags & REC_HAS_SEARCH) || r.srchBest == 255) continue;
             if (n >= limit) break;
@@ -74,12 +79,16 @@ int main(int argc, char** argv) {
             const float ourWR = std::abs(res.score) >= ab::MATE_BOUND ? (res.score > 0 ? 1.f : 0.f)
                                                                      : metrics::sigmoid(res.score / mdl.scale);
             verdictAgree += ((ourWR - 0.5f) * (r.srchWR - 0.5f) >= 0);
+            if (r.srchWR >= 0.999f) { ++rWin; rWinFound += res.score >= ab::MATE_BOUND; }
+            if (r.srchWR <= 0.001f) { ++rLoss; rLossFound += res.score <= -ab::MATE_BOUND; }
             depthSum += res.depth; nodeSum += res.nodes; msSum += res.timeMs;
         }
         if (!n) { std::printf("no search-labelled records\n"); return 0; }
         std::printf("[search] n=%zu bestmove-agree=%.3f verdict-agree=%.3f avg-depth=%.2f avg-nodes=%.0f avg-ms=%.1f nps=%.0f\n",
                     n, double(agree) / n, double(verdictAgree) / n, depthSum / n, nodeSum / n, msSum / n,
                     msSum > 0 ? nodeSum / (msSum / 1000) : 0);
+        std::printf("[search] Rapfi-says-WIN n=%zu ours-found-mate=%.3f | Rapfi-says-LOSS n=%zu ours-found-mated=%.3f\n",
+                    rWin, rWin ? double(rWinFound) / rWin : 0, rLoss, rLoss ? double(rLossFound) / rLoss : 0);
         return 0;
     }
     if (mode == "bench") {
@@ -89,15 +98,20 @@ int main(int argc, char** argv) {
         for (auto& r : recs) if (!(r.flags & (REC_SELF_FIVE | REC_SIBLING | REC_LEAF)) && r.ply >= 8) pos.push_back(r);
         if (pos.size() > 2000) pos.resize(2000);
         long long acc = 0; int mv[NMOVES];
-        auto t0 = std::chrono::steady_clock::now(); long n = 0;
-        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); ++n; }
-        const double setupUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
-        t0 = std::chrono::steady_clock::now(); n = 0;
-        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); acc += b.evaluate(); ++n; }
-        const double evalUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n - setupUs;
-        t0 = std::chrono::steady_clock::now(); n = 0;
-        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); acc += b.generate(mv); ++n; }
-        const double genUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n - setupUs;
+        // 같은 보드에서 반복 호출해 순수 비용만 잰다
+        double evalNs = 0, genNs = 0; long n = 0;
+        for (auto& r : pos) {
+            r.toBoard(b);
+            auto t0 = std::chrono::steady_clock::now();
+            for (int k = 0; k < 64; ++k) acc += b.evaluate();
+            auto t1 = std::chrono::steady_clock::now();
+            for (int k = 0; k < 64; ++k) acc += b.generate(mv);
+            auto t2 = std::chrono::steady_clock::now();
+            evalNs += std::chrono::duration<double, std::nano>(t1 - t0).count();
+            genNs += std::chrono::duration<double, std::nano>(t2 - t1).count();
+            n += 64;
+        }
+        const double evalUs = evalNs / n / 1000, genUs = genNs / n / 1000;
         const uint64_t nodes = uint64_t(num(a, "nodes", 50000));
         ab::Searcher<Board> s(64); double tn = 0, tms = 0, dep = 0; int k = 0;
         for (size_t i = 0; i < pos.size() && k < int(num(a, "searches", 40)); i += 50, ++k) {
@@ -105,8 +119,8 @@ int main(int argc, char** argv) {
             ab::Result r = s.think(b, ab::Limits{ab::MAX_PLY - 1, -1, nodes});
             tn += double(r.nodes); tms += double(r.timeMs); dep += r.depth;
         }
-        std::printf("[bench] %s evaluate=%.2fus generate(+policy sort)=%.2fus | search %llu nodes x%d: nps=%.0f avg-depth=%.2f (acc=%lld)\n",
-                    mdl.compact ? "compact" : "full", evalUs, genUs, (unsigned long long)nodes, k, tn / (tms / 1000), dep / k, acc);
+        std::printf("[bench] evaluate=%.2fus generate(+policy sort)=%.2fus | search %llu nodes x%d: nps=%.0f avg-depth=%.2f (acc=%lld)\n",
+                    evalUs, genUs, (unsigned long long)nodes, k, tn / (tms / 1000), dep / k, acc);
         return 0;
     }
     if (mode == "leafdump") {
