@@ -423,4 +423,112 @@ inline bool Board::vcfProbe(int plyFromRoot, int& score) const {
     return true;
 }
 
+// ── VCT 탐색기 (위협 공간 AND/OR 탐색, 루트 전용) ──
+// 공격: 4 또는 열린 3 을 만드는 수만.  방어: 막기 / 위협 제거(defenseMoves) / 맞받기 4.
+// 상대가 4 로 맞받으면 공격자는 막아야 하고(강제), 그 뒤 공격을 이어간다.
+// 반환: 공격 측 필승이면 true (bestMove = 첫 수). 한도 초과·불명은 false.
+struct VctCache {
+    static constexpr int BITS = 18;
+    uint64_t keys[1 << BITS] = {};
+    static VctCache& get() { static thread_local VctCache c; return c; }
+    bool knownFail(uint64_t k) const { return keys[k & ((1 << BITS) - 1)] == k; }
+    void markFail(uint64_t k) { keys[k & ((1 << BITS) - 1)] = k; }
+};
+
+namespace detail {
+inline int fiveCellNear(const Board& b, int c, int colIdx) {      // c 의 4방향 ±4 안에서 colIdx 의 5목 자리
+    for (int d = 0; d < 4; ++d)
+        for (int k = -4; k <= 4; ++k) {
+            const int q = c + k * DIRS[d];
+            if (k && b.cell[q] == EMPTY && b.cls[colIdx][q] == C_FIVE) return q;
+        }
+    return -1;
+}
+inline int anyFiveCell(const Board& b, int colIdx) {
+    const int* cells = feat::boardCells();
+    for (int m = 0; m < NMOVES; ++m) if (b.cell[cells[m]] == EMPTY && b.cls[colIdx][cells[m]] == C_FIVE) return cells[m];
+    return -1;
+}
+
+bool vctAttack(Board& b, int depth, int& budget, int* firstMove);
+
+// 방어 측 차례: 모든 방어수에 대해 공격이 계속 성공해야 true
+inline bool vctDefend(Board& b, int depth, int& budget) {
+    const int s = b.side - 1, o = 2 - b.side;                 // s = 방어자, o = 공격자
+    if (b.clsCnt[s][C_FIVE]) return false;                    // 방어자가 바로 5목
+    if (b.clsCnt[o][C_FIVE] >= 2) return true;                // 막을 수 없는 쌍사
+    int mv[NMOVES], n = 0;
+    if (b.clsCnt[o][C_FIVE]) {                                // 공격자 4: 막기만
+        const int q = anyFiveCell(b, o);
+        if (q < 0) return false;
+        mv[n++] = toMove(q);
+    } else if (b.oppThreat()) {                               // 공격자 열린 3 류: 위협 제거 + 맞받기 4
+        n = b.defenseMoves(mv);
+        if (n == 0) return true;                              // 막을 길이 없다
+    } else return false;                                      // 위협이 없으면 VCT 실패
+    for (int i = 0; i < n; ++i) {
+        if (--budget < 0) return false;
+        b.make(mv[i]);
+        bool ok;
+        if (b.isLoss()) ok = false;
+        else if (b.clsCnt[2 - b.side][C_FIVE]) {               // 방어자가 맞받기 4 → 공격자는 막아야 함
+            const int q = anyFiveCell(b, 2 - b.side);
+            ok = false;
+            if (q >= 0 && !b.clsCnt[b.side - 1][C_FIVE]) {
+                const int qm = toMove(q);
+                b.make(qm);
+                ok = vctDefend(b, depth, budget);              // 막은 뒤에도 공격자의 위협이 남아 있어야 한다
+                b.undo(qm);
+            } else if (b.clsCnt[b.side - 1][C_FIVE]) ok = true;   // 공격자가 먼저 5목
+        } else ok = vctAttack(b, depth - 1, budget, nullptr);
+        b.undo(mv[i]);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// 공격 측 차례
+inline bool vctAttack(Board& b, int depth, int& budget, int* firstMove) {
+    const int s = b.side - 1, o = 2 - b.side;
+    if (b.clsCnt[s][C_FIVE]) { if (firstMove) *firstMove = toMove(anyFiveCell(b, s)); return true; }
+    if (b.clsCnt[o][C_FIVE]) return false;                    // 상대 4 를 먼저 막아야 함 → 이 단순 VCT 는 포기
+    if (depth <= 0) return false;
+    const uint64_t key = b.key() ^ (uint64_t(depth) * 0x9E3779B97F4A7C15ull);
+    auto& cache = VctCache::get();
+    if (!firstMove && cache.knownFail(key)) return false;
+    const int* cells = feat::boardCells();
+    int mv[96], n = 0;
+    for (int k = C_WINFOUR; k >= C_OPEN3 && n < 96; --k) {
+        if (!b.clsCnt[s][k] || k == C_THREE || k == C_THREE_PLUS) continue;
+        for (int w = 0; w < 4 && n < 96; ++w)
+            for (uint64_t bits = b.candBits[w]; bits && n < 96; bits &= bits - 1) {
+                const int m = w * 64 + __builtin_ctzll(bits);
+                if (b.cls[s][cells[m]] == k) mv[n++] = m;
+            }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (--budget < 0) return false;
+        b.make(mv[i]);
+        const bool ok = !b.isLoss() && vctDefend(b, depth, budget);
+        b.undo(mv[i]);
+        if (ok) { if (firstMove) *firstMove = mv[i]; return true; }
+    }
+    if (budget >= 0) cache.markFail(key);
+    return false;
+}
+} // namespace detail
+
+// 루트 VCT: 둘 차례가 위협 연속으로 이기는 첫 수 (없거나 한도 초과면 -1)
+inline int Board::rootVct(int maxAttack, int budget) const {
+    Board& b = const_cast<Board&>(*this);
+    const bool l0 = b.light; b.light = true;
+    int first = -1, bud = budget;
+    for (int d = 1; d <= maxAttack && bud > 0; ++d) {          // 짧은 승리부터 반복 심화
+        int f = -1;
+        if (detail::vctAttack(b, d, bud, &f)) { first = f; break; }
+    }
+    b.light = l0;
+    return first;
+}
+
 } // namespace gmk

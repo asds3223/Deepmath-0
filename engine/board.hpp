@@ -142,6 +142,7 @@ public:
     // VCF(연속 4) 강제승 판정: 둘 차례가 4 만 계속 두어 이길 수 있으면 true, dist = 승리까지 수 (eval.hpp)
     bool vcfWin(int maxPly, int& dist) const;
     bool vcfProbe(int plyFromRoot, int& score) const;
+    int  rootVct(int maxAttack, int budget) const;           // 루트 VCT 첫 수 (eval.hpp)
     int  forcingMoves(int* out, bool allowThree) const;                    // eval.hpp: 4 (+열린 3) 만드는 수
 
     // 리프에서 정확히 판정 가능한 전술 상황
