@@ -48,39 +48,68 @@ struct Grad {
     }
 };
 
-struct Opts { float lambda; bool value, policy; };
+struct Opts {
+    float lambda; bool value, policy;
+    float wbal;    // 균형 국면 가중치: w = 1 + wbal * 4p(1-p)
+    float pairW;   // 형제 순위 손실 가중치 (같은 부모의 자식 간 NNUE 우열 순서를 직접 맞춤)
+};
+using Item = std::pair<uint32_t, uint32_t>;   // (시작 인덱스, 개수) — 형제 묶음은 한 아이템
 
-void accumulate(const Model& mdl, const Record* recs, const uint32_t* idx, size_t n, const Opts& o, Grad& g) {
-    Board b; b.model = &mdl;
+void accumulate(const Model& mdl, const Record* recs, const Item* items, size_t n, const Opts& o, Grad& g) {
+    thread_local std::vector<Board> boards(16);
     int moves[NMOVES]; float tgt[NMOVES], sc[NMOVES];
-    for (size_t k = 0; k < n; ++k) {
-        const Record& r = recs[idx[k]];
-        r.toBoard(b);
-        if (o.value) {
+    float v[16], pt[16], gr[16];
+    for (size_t it = 0; it < n; ++it) {
+        const uint32_t base = items[it].first, k = std::min<uint32_t>(items[it].second, 16);
+        for (uint32_t i = 0; i < k; ++i) {
+            const Record& r = recs[base + i];
+            Board& b = boards[i]; b.model = &mdl; r.toBoard(b);
             float p = r.nnWinrate();
             if (o.lambda > 0 && (r.flags & REC_HAS_SEARCH) && !std::isnan(r.srchWR)) p = (1 - o.lambda) * p + o.lambda * r.srchWR;
-            const float v = mdl.valueLogit(b), q = metrics::sigmoid(v);
-            const float gr = q - p;
-            const float t = feat::taper(b);
-            const float g0 = gr * (1 - t), g1 = gr * t;
-            mdl.forValue(b, [&](int i) { g.gv[2 * i] += g0; g.gv[2 * i + 1] += g1; });
-            g.vloss += -(p * std::log(std::max(q, 1e-7f)) + (1 - p) * std::log(std::max(1 - q, 1e-7f)));
-            ++g.vn;
+            pt[i] = p;
+            v[i] = o.value ? mdl.valueLogit(b) : 0.f;
+            const float q = metrics::sigmoid(v[i]);
+            gr[i] = (1 + o.wbal * 4 * p * (1 - p)) * (q - p);
+            if (o.value) {
+                g.vloss += -(p * std::log(std::max(q, 1e-7f)) + (1 - p) * std::log(std::max(1 - q, 1e-7f)));
+                ++g.vn;
+            }
         }
-        if (o.policy && !(r.flags & REC_OPPO_FIVE)) {
-            const int nc = metrics::policyTarget(b, r, moves, tgt);
-            if (nc >= 2) {
-                const int tc = feat::threatClass(b);
-                float mx = -1e30f;
-                for (int i = 0; i < nc; ++i) { sc[i] = mdl.policyScore(b, toCell(moves[i]), tc); mx = std::max(mx, sc[i]); }
-                double z = 0; for (int i = 0; i < nc; ++i) z += std::exp(sc[i] - mx);
-                for (int i = 0; i < nc; ++i) {
-                    const float pr = float(std::exp(sc[i] - mx) / z);
-                    const float gr = pr - tgt[i];
-                    if (tgt[i] > 0) g.ploss += -tgt[i] * std::log(std::max(pr, 1e-9f));
-                    if (gr != 0) mdl.forPolicy(b, toCell(moves[i]), tc, [&](int f) { g.gp[f] += gr; });
+        if (o.value && o.pairW > 0 && k >= 2) {
+            int np = 0;
+            for (uint32_t i = 0; i < k; ++i) for (uint32_t j = i + 1; j < k; ++j) np += std::fabs(pt[i] - pt[j]) >= 0.03f;
+            if (np) {
+                const float w = o.pairW * float(k) / float(np);   // 묶음 크기에 비례, 쌍 수로 정규화
+                for (uint32_t i = 0; i < k; ++i) for (uint32_t j = i + 1; j < k; ++j) {
+                    if (std::fabs(pt[i] - pt[j]) < 0.03f) continue;
+                    const uint32_t hi = pt[i] > pt[j] ? i : j, lo = hi == i ? j : i;
+                    const float d = v[hi] - v[lo], sg = metrics::sigmoid(-d);
+                    gr[hi] -= w * sg; gr[lo] += w * sg;
+                    g.ploss += 0;   // (순위 손실은 보고에서 제외)
                 }
-                ++g.pn;
+            }
+        }
+        for (uint32_t i = 0; i < k; ++i) {
+            const Record& r = recs[base + i];
+            Board& b = boards[i];
+            if (o.value) {
+                const float t = feat::taper(b), g0 = gr[i] * (1 - t), g1 = gr[i] * t;
+                mdl.forValue(b, [&](int f) { g.gv[2 * f] += g0; g.gv[2 * f + 1] += g1; });
+            }
+            if (o.policy && !(r.flags & REC_OPPO_FIVE)) {
+                const int nc = metrics::policyTarget(b, r, moves, tgt);
+                if (nc >= 2) {
+                    const int tc = feat::threatClass(b);
+                    float mx = -1e30f;
+                    for (int c = 0; c < nc; ++c) { sc[c] = mdl.policyScore(b, toCell(moves[c]), tc); mx = std::max(mx, sc[c]); }
+                    double z = 0; for (int c = 0; c < nc; ++c) z += std::exp(sc[c] - mx);
+                    for (int c = 0; c < nc; ++c) {
+                        const float pr = float(std::exp(sc[c] - mx) / z), gp = pr - tgt[c];
+                        if (tgt[c] > 0) g.ploss += -tgt[c] * std::log(std::max(pr, 1e-9f));
+                        if (gp != 0) mdl.forPolicy(b, toCell(moves[c]), tc, [&](int f) { g.gp[f] += gp; });
+                    }
+                    ++g.pn;
+                }
             }
         }
     }
@@ -115,7 +144,8 @@ int main(int argc, char** argv) {
     const float  lr0      = float(argf(a, "lr", 0.02));
     const float  l2       = float(argf(a, "l2", 1e-6));
     const float  valFrac  = float(argf(a, "val-frac", 0.05));
-    Opts o{float(argf(a, "lambda", 0.0)), argf(a, "value", 1) != 0, argf(a, "policy", 1) != 0};
+    Opts o{float(argf(a, "lambda", 0.0)), argf(a, "value", 1) != 0, argf(a, "policy", 1) != 0,
+           float(argf(a, "wbal", 0.0)), float(argf(a, "pair", 0.0))};
 
     std::vector<Record> recs, val;
     for (auto& f : dataFiles) if (!readRecords(f, recs)) { std::fprintf(stderr, "cannot read %s\n", f.c_str()); return 1; }
@@ -143,11 +173,19 @@ int main(int argc, char** argv) {
     }
     Adam av, ap; av.init(mdl.wv.size()); ap.init(mdl.wp.size());
     std::vector<Grad> grads(threads);
-    std::vector<uint32_t> order(recs.size());
-    for (size_t i = 0; i < order.size(); ++i) order[i] = uint32_t(i);
+    // 아이템 구성: 연속된 같은 그룹의 형제 국면은 한 묶음으로 (셔플해도 함께 다님)
+    std::vector<Item> order;
+    for (size_t i = 0; i < recs.size();) {
+        size_t j = i + 1;
+        const uint32_t gid = (recs[i].flags & REC_SIBLING) ? recs[i].group() : 0;
+        if (gid) while (j < recs.size() && j - i < 16 && (recs[j].flags & REC_SIBLING) && recs[j].group() == gid) ++j;
+        order.push_back({uint32_t(i), uint32_t(j - i)});
+        i = j;
+    }
+    std::printf("items=%zu (sibling groups merged) wbal=%.2f pair=%.2f lr=%.4f l2=%.1e\n", order.size(), o.wbal, o.pairW, lr0, l2);
 
     { metrics::Report rep; metrics::evalSet(mdl, val, rep); rep.print("[init]", false); }
-    const size_t stepsPerEpoch = (recs.size() + batch - 1) / batch;
+    const size_t stepsPerEpoch = (order.size() + batch - 1) / batch;
     const size_t totalSteps = stepsPerEpoch * epochs;
     size_t step = 0;
     for (int ep = 0; ep < epochs; ++ep) {
@@ -155,7 +193,7 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::steady_clock::now();
         double vl = 0, pl = 0; size_t vn = 0, pn = 0;
         for (size_t s = 0; s < stepsPerEpoch; ++s, ++step) {
-            const size_t lo = s * batch, hi = std::min(recs.size(), lo + batch), n = hi - lo;
+            const size_t lo = s * batch, hi = std::min(order.size(), lo + batch), n = hi - lo;
             std::vector<std::thread> th;
             for (int t = 0; t < threads; ++t) {
                 const size_t a0 = lo + n * t / threads, a1 = lo + n * (t + 1) / threads;
