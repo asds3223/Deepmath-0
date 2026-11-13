@@ -1,0 +1,139 @@
+diff --git a/Rapfi/search/ab/search.cpp b/Rapfi/search/ab/search.cpp
+index 34652d5..ac87e55 100644
+--- a/Rapfi/search/ab/search.cpp
++++ b/Rapfi/search/ab/search.cpp
+@@ -31,6 +31,7 @@
+ #include "../skill.h"
+ #include "parameter.h"
+ #include "searcher.h"
++#include "ablate.h"
+ #include "searchstack.h"
+ 
+ #include <algorithm>
+@@ -635,6 +636,7 @@ Value search(Board &board, SearchStack *ss, Value alpha, Value beta, Depth depth
+ 
+     // Dive into vcf search when the depth reaches zero (~17 elo)
+     if (depth <= 0.0f) {
++        if (!Ablate::vcfLeaf && !oppo5) return Evaluation::evaluate<Rule>(board, alpha, beta);
+         return oppo5 ? vcfdefend<Rule, NT>(board, ss, alpha, beta)
+                      : vcfsearch<Rule, NT>(board, ss, alpha, beta);
+     }
+@@ -837,21 +839,21 @@ Value search(Board &board, SearchStack *ss, Value alpha, Value beta, Depth depth
+     }
+ 
+     // Step 7. Razoring with VCF (~68 elo)
+-    if (!PvNode
++    if (Ablate::razor && !PvNode
+         && (alpha < VALUE_MATE_IN_MAX_PLY || !ttHit)  // We are not searching for a short win
+         && eval + razorMargin<Rule>(depth) < alpha) {
+         return vcfsearch<Rule, NonPV>(board, ss, alpha, alpha + 1);
+     }
+ 
+     // Step 8. Futility pruning: child node (~121 elo)
+-    if (!PvNode && eval < VALUE_MATE_IN_MAX_PLY  // Do not return unproven wins
++    if (Ablate::futility && !PvNode && eval < VALUE_MATE_IN_MAX_PLY  // Do not return unproven wins
+         && beta > VALUE_MATED_IN_MAX_PLY         // Confirm non-losing move exists
+         && eval - futilityMargin<Rule>(depth - 1, cutNode && !ttHit, improvement > 0) >= beta
+         && !((ss - 2)->moveP4[self] >= E_BLOCK4 && (ss - 4)->moveP4[self] >= E_BLOCK4))
+         return eval;
+ 
+     // Step 9. Null move pruning (~3 elo)
+-    if (!PvNode && !oppo4 && !skipMove && eval >= beta
++    if (Ablate::nullMove && !PvNode && !oppo4 && !skipMove && eval >= beta
+         && board.getLastMove() != Pos::PASS  // No consecutive pass moves
+         && ss->staticEval >= beta + nullMoveMargin<Rule>(depth)) {
+         Depth r         = nullMoveReduction<Rule>(depth);
+@@ -885,12 +887,12 @@ Value search(Board &board, SearchStack *ss, Value alpha, Value beta, Depth depth
+         depth -= IIR_REDUCTION_PV;
+ 
+     // Reduce for pv ttMove that has not been chosen for a few iterations (~32 elo)
+-    if (PvNode && depth > 1 && ttMove)
++    if (Ablate::iirTT && PvNode && depth > 1 && ttMove)
+         depth -= std::clamp((depth - ttDepth) * IIR_REDUCTION_TT, 0.0f, IIR_REDUCTION_TT_MAX);
+ 
+     // Drop to vcfsearch if depth is below zero
+     if (depth <= 0)
+-        return vcfsearch<Rule, NT>(board, ss, alpha, beta);
++        return Ablate::vcfLeaf ? vcfsearch<Rule, NT>(board, ss, alpha, beta) : Evaluation::evaluate<Rule>(board, alpha, beta);
+ 
+     // Internal iterative deepening on higher depth (~1 elo)
+     if (depth >= IID_DEPTH && !ttMove) {
+@@ -924,7 +926,7 @@ moves_loop:
+ 
+     // Fail-High reduction (~50 elo)
+     // Indicate cutNode that will probably fail high if current eval is far above beta
+-    bool likelyFailHigh = !PvNode && cutNode && eval >= beta + failHighMargin(depth, oppo4);
++    bool likelyFailHigh = Ablate::failHigh && !PvNode && cutNode && eval >= beta + failHighMargin(depth, oppo4);
+ 
+     MovePicker mp(Rule,
+                   board,
+@@ -999,7 +1001,7 @@ moves_loop:
+         // Also skip pruning if there might be a child database record we want to read.
+         if (!RootNode && !dbCheckChild && bestValue > VALUE_MATED_IN_MAX_PLY) {
+             // Move count pruning: skip move if movecount is above threshold (~107 elo)
+-            if (moveCount >= futilityMoveCount(depth, improvement > 0))
++            if (Ablate::lmp && moveCount >= futilityMoveCount(depth, improvement > 0))
+                 continue;
+ 
+             // Skip trivial moves at lower depth (~2 elo at LTC)
+@@ -1020,11 +1022,11 @@ moves_loop:
+ 
+         // Singular response extension for opponent B4 attack (~77 elo)
+         if (oppo5)
+-            extension = OPPO5_EXT;
++            extension = Ablate::oppo5Ext ? OPPO5_EXT : 0;
+ 
+         // Singular extension: only one move fails high while other moves fails low on a search of
+         // (alpha-s, beta-s), then this move is singular and should be extended. (~52 elo)
+-        else if (!RootNode && depth >= SE_DEPTH && move == ttMove
++        else if (Ablate::singular && !RootNode && depth >= SE_DEPTH && move == ttMove
+                  && !skipMove                                  // No recursive singular search
+                  && std::abs(ttValue) < VALUE_MATE_IN_MAX_PLY  // ttmove value is not a mate
+                  && (ttBound & BOUND_LOWER)                    // ttMove failed high last time
+@@ -1100,7 +1102,7 @@ moves_loop:
+ 
+         // Step 15. Late move reduction (LMR). Moves are searched with a reduced
+         // depth and will be re-searched at full depth if fail high.
+-        if (depth >= 2 && moveCount > 1 + RootNode) {
++        if (Ablate::lmr && depth >= 2 && moveCount > 1 + RootNode) {
+             Depth r = reduction<Rule, PvNode>(searcher->reductions,
+                                               depth,
+                                               moveCount,
+diff --git a/Rapfi/search/movepick.cpp b/Rapfi/search/movepick.cpp
+index 6bdac1c..7f9f7d9 100644
+--- a/Rapfi/search/movepick.cpp
++++ b/Rapfi/search/movepick.cpp
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "movepick.h"
++#include "ab/ablate.h"
+ 
+ #include "../eval/evaluator.h"
+ #include "../game/board.h"
+@@ -124,7 +125,7 @@ MovePicker::MovePicker(Rule rule, const Board &board, ExtraArgs<MovePicker::ROOT
+         if (useNormalizedPolicy)
+             scoreAllMoves<ScoreType(BALANCED | POLICY)>();
+     }
+-    else if (board.p4Count(oppo, C_BLOCK4_FLEX3)
++    else if (Search::AB::Ablate::defendGen && board.p4Count(oppo, C_BLOCK4_FLEX3)
+              && (rule != Rule::RENJU || validateOpponentCMove(board))) {
+         switch (rule) {
+         default:
+@@ -170,14 +171,14 @@ MovePicker::MovePicker(Rule rule, const Board &board, ExtraArgs<MovePicker::MAIN
+         stage    = DEFENDFIVE_TT;
+         ttmValid = board.cell(args.ttMove).pattern4[oppo] == A_FIVE;
+     }
+-    else if (board.p4Count(oppo, B_FLEX4)) {
++    else if (Search::AB::Ablate::defendGen && board.p4Count(oppo, B_FLEX4)) {
+         stage = DEFENDFOUR_TT;
+ 
+         const Cell &ttCell = board.cell(args.ttMove);
+         ttmValid           = ttCell.pattern4[BLACK] >= E_BLOCK4 || ttCell.pattern4[BLACK] == FORBID
+                    || ttCell.pattern4[WHITE] >= E_BLOCK4;
+     }
+-    else if (board.p4Count(oppo, C_BLOCK4_FLEX3)
++    else if (Search::AB::Ablate::defendGen && board.p4Count(oppo, C_BLOCK4_FLEX3)
+              && (rule != Rule::RENJU || validateOpponentCMove(board))) {
+         stage    = DEFENDB4F3_TT;
+         ttmValid = true;

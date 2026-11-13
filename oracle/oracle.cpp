@@ -27,6 +27,7 @@
 #include "game/board.h"
 #include "search/searchthread.h"
 #include "search/ab/searcher.h"
+#include "search/ab/ablate.h"
 
 #include <algorithm>
 #include <chrono>
@@ -453,6 +454,15 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     // Rapfi 고전평가 모드: NNUE 평가자를 떼어 내면 Rapfi 탐색이 자체 고전평가만 쓴다
     const bool rapfiClassical = get(a, "rapfi-classical", 0) != 0;
     if (rapfiClassical) Search::Threads.setupEvaluator(nullptr);
+    // Rapfi 탐색 기능 끄기 (기여도 측정): --rapfi-off vcfleaf,razor,futility,null,lmp,oppo5ext,singular,lmr,failhigh,defend,iirtt
+    {
+        namespace A = Search::AB::Ablate;
+        std::string off = get<std::string>(a, "rapfi-off", "");
+        auto has = [&](const char* k) { return ("," + off + ",").find(std::string(",") + k + ",") != std::string::npos; };
+        A::vcfLeaf = !has("vcfleaf"); A::razor = !has("razor"); A::futility = !has("futility"); A::nullMove = !has("null");
+        A::lmp = !has("lmp"); A::oppo5Ext = !has("oppo5ext"); A::singular = !has("singular"); A::lmr = !has("lmr");
+        A::failHigh = !has("failhigh"); A::defendGen = !has("defend"); A::iirTT = !has("iirtt");
+    }
     const bool rapfiPolicy = rmode == "policy", rapfiMixed = rmode == "mixed", rapfiSrch = rmode == "search";
     const int64_t rms = get<int64_t>(a, "rapfi-ms", 0);
     const uint64_t rnodes = get<uint64_t>(a, "rapfi-nodes", 0), onodes = get<uint64_t>(a, "nodes", 0);
