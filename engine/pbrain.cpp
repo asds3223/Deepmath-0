@@ -26,7 +26,7 @@ using namespace gmk;
 
 namespace {
 
-const char* VERSION = "0.2";
+const char* VERSION = "0.3";
 
 std::string coord(int m) {     // a1 ~ o15 (열 문자 + 행 번호)
     if (m < 0) return "--";

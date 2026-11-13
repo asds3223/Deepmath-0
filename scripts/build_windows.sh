@@ -4,7 +4,7 @@
 # 필요: apt-get install g++-mingw-w64-x86-64-posix
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MODEL=${1:-old/b.dce}
+MODEL=${1:-models/c.dce}
 mkdir -p build dist
 python3 scripts/embed_model.py "$MODEL" build/model_data.h
 x86_64-w64-mingw32-g++ -O3 -std=c++17 -march=haswell -mtune=generic -DNDEBUG -DDCE_EMBED_MODEL -Ibuild \
