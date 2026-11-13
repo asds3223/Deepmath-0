@@ -450,6 +450,9 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
     const bool oursSearch = get<std::string>(a, "ours", "greedy") == "search";
     const std::string rmode = get<std::string>(a, "rapfi", "greedy");
+    // Rapfi 고전평가 모드: NNUE 평가자를 떼어 내면 Rapfi 탐색이 자체 고전평가만 쓴다
+    const bool rapfiClassical = get(a, "rapfi-classical", 0) != 0;
+    if (rapfiClassical) Search::Threads.setupEvaluator(nullptr);
     const bool rapfiPolicy = rmode == "policy", rapfiMixed = rmode == "mixed", rapfiSrch = rmode == "search";
     const int64_t rms = get<int64_t>(a, "rapfi-ms", 0);
     const uint64_t rnodes = get<uint64_t>(a, "rapfi-nodes", 0), onodes = get<uint64_t>(a, "nodes", 0);
@@ -488,7 +491,7 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     srch.cfg.useIIR       = get(a, "iir", 1) != 0;
     srch.cfg.useImproving = get(a, "impr", 1) != 0;
     srch.cfg.useCounter   = get(a, "cm", 1) != 0;
-    const bool diag = get(a, "diag", 0) != 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
+    const bool diag = get(a, "diag", 0) != 0 && get(a, "rapfi-classical", 0) == 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
     gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);
     gmk::g_vcfMaxPly      = get(a, "vcfply", gmk::g_vcfMaxPly);
