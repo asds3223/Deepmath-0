@@ -82,13 +82,13 @@ struct RankStats {
 };
 
 struct PolicyStats {
-    double n = 0, top1 = 0, top3 = 0, ce = 0;
+    double n = 0, top1 = 0, top3 = 0, top5 = 0, top8 = 0, ce = 0;
     void add(const float* score, const float* tgt, int n_) {
         int ib = 0, it = 0;
         for (int i = 1; i < n_; ++i) { if (score[i] > score[ib]) ib = i; if (tgt[i] > tgt[it]) it = i; }
         top1 += (ib == it);
         int rank = 0; for (int i = 0; i < n_; ++i) if (score[i] > score[it]) ++rank;
-        top3 += (rank < 3);
+        top3 += (rank < 3); top5 += (rank < 5); top8 += (rank < 8);
         float mx = score[0]; for (int i = 1; i < n_; ++i) mx = std::max(mx, score[i]);
         double z = 0; for (int i = 0; i < n_; ++i) z += std::exp(score[i] - mx);
         for (int i = 0; i < n_; ++i) if (tgt[i] > 0) ce += -tgt[i] * (score[i] - mx - std::log(z));
@@ -131,8 +131,8 @@ struct Report {
                         tag, rank.groups, rank.pairs, rank.agree / std::max(rank.pairs, 1.0), rank.bestAgree / rank.groups,
                         rank.regret / rank.groups, rank.baseAgree / std::max(rank.pairs, 1.0), rank.baseRegret / rank.groups);
         if (pol.n)
-            std::printf("%s  policy(보조)  n=%.0f top1=%.3f nnTop1-in-top3=%.3f ce=%.4f\n", tag, pol.n, pol.top1 / pol.n,
-                        pol.top3 / pol.n, pol.ce / pol.n);
+            std::printf("%s  policy(보조)  n=%.0f top1=%.3f nnTop1-in-top3=%.3f top5=%.3f top8=%.3f ce=%.4f\n", tag, pol.n,
+                        pol.top1 / pol.n, pol.top3 / pol.n, pol.top5 / pol.n, pol.top8 / pol.n, pol.ce / pol.n);
         std::fflush(stdout);
     }
 };
