@@ -16,6 +16,8 @@
 //   PLS  4방향 줄 모양 원형 (좌우 반전 동치)                    — 줄 위 미세한 모양 차이
 //   PR1/PR2  상대 직전 수 / 자기 직전 수까지의 상대 좌표 (9x9, 그 밖 1칸)
 //   PRS/PRO  상대 직전 수 상대 좌표 × 이 칸의 자기 / 상대 등급   — 응수 자리(막기·맞받기) 구분
+//   PTC/PTO  전역 전술 등급(25) × 이 칸의 자기 / 상대 조합 코드(495) — 상황에 따른 급소의 무게
+//   PL1/PL2  상대 / 자기 직전 수와 같은 줄(거리 1..4) 위: 거리 × 그 방향 자기 단계 × 상대 단계
 #pragma once
 #include "board.hpp"
 #include <algorithm>
@@ -59,6 +61,21 @@ inline int relOffset(int c, int m) {
     return (dy + 4) * 9 + (dx + 4);
 }
 
+// c 가 직전 수 m 과 같은 줄(거리 1..4) 위에 있으면 (방향, 거리) — 아니면 d = -1
+inline void lineRel(int c, int m, int& d, int& dist) {
+    d = -1; dist = 0;
+    if (m < 0) return;
+    const int q = toCell(m);
+    const int dx = cellX(c) - cellX(q), dy = cellY(c) - cellY(q);
+    int k = 0;
+    if (dy == 0) { d = 0; k = dx; } else if (dx == 0) { d = 1; k = dy; }
+    else if (dx == dy) { d = 2; k = dx; } else if (dx == -dy) { d = 3; k = dy; }
+    if (d < 0) return;
+    k = k < 0 ? -k : k;
+    if (k < 1 || k > 4) { d = -1; return; }
+    dist = k;
+}
+
 // 3x3 모양 정규화: 8 대칭 중 최소 키로 묶어 조밀한 id
 struct ShapeCanon {
     int id[KEY_NB];
@@ -88,7 +105,8 @@ private:
     }
 };
 inline bool g_useShape = true;
-inline bool g_policyExt = true;  // 정책 확장 표(PLS/PR*) 사용   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
+inline bool g_policyExt = true;  // 정책 확장 표(PLS/PR*) 사용
+inline bool g_policyExt2 = true; // 정책 2차 결합 표(PTC/PTO/PL*) 사용   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
 
 inline int orbitOf(int c) {       // 15x15 D4 대칭 궤도 (36개)
     int x = cellX(c), y = cellY(c);
@@ -107,7 +125,7 @@ inline int distBucket(int c, int m) {
 
 struct Layout {
     int CS, CO, J, INIT, CNT, PSQ, SH, BIAS, PH, NV;      // value
-    int PCS, PCO, PSH, PJ, PD1, PD2, PPSQ, PLS, PR1, PR2, PRS, PRO, NP;   // policy (새 표는 뒤에 붙인다)
+    int PCS, PCO, PSH, PJ, PD1, PD2, PPSQ, PLS, PR1, PR2, PRS, PRO, PTC, PTO, PL1, PL2, NP;   // policy (새 표는 뒤에 붙인다)
     static const Layout& get() { static const Layout l; return l; }
 private:
     Layout() {
@@ -135,6 +153,10 @@ private:
         PR2 = o;  o += 82;
         PRS = o;  o += 82 * CLASS_NB;
         PRO = o;  o += 82 * CLASS_NB;
+        PTC = o;  o += 25 * CODE_NB;
+        PTO = o;  o += 25 * CODE_NB;
+        PL1 = o;  o += 4 * LEVEL_NB * LEVEL_NB;
+        PL2 = o;  o += 4 * LEVEL_NB * LEVEL_NB;
         NP = o;
     }
 };
@@ -204,6 +226,15 @@ inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
         emit(L.PR2 + relOffset(c, b.lastMove(1)));
         emit(L.PRS + r1 * CLASS_NB + b.cls[s][c]);
         emit(L.PRO + r1 * CLASS_NB + b.cls[o][c]);
+    }
+    if (g_policyExt2) {
+        emit(L.PTC + tclass * CODE_NB + b.code[s][c]);
+        emit(L.PTO + tclass * CODE_NB + b.code[o][c]);
+        int d, k;
+        lineRel(c, b.lastMove(0), d, k);
+        if (d >= 0) emit(L.PL1 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
+        lineRel(c, b.lastMove(1), d, k);
+        if (d >= 0) emit(L.PL2 + ((k - 1) * LEVEL_NB + b.lv[s][d][c]) * LEVEL_NB + b.lv[o][d][c]);
     }
 }
 
