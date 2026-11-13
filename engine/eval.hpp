@@ -20,7 +20,16 @@ public:
     template <class F> void forValue(const Board& b, F&& f) const { feat::valueFeatures(b, f); }
     template <class F> void forPolicy(const Board& b, int c, int tc, F&& f) const { feat::policyFeatures(b, c, tc, f); }
 
-    Model() { const auto& L = feat::Layout::get(); wv.assign(2 * size_t(L.NV), 0.f); wp.assign(L.NP, 0.f); }
+    // 탐색용 정수 가중치 (증분 누적의 정확한 복원을 위해 정수화)
+    std::vector<int32_t> qv;    // 가치: 점수(로짓×scale) × 16
+    std::vector<int32_t> qp;    // 정책: 로짓 × 256
+
+    Model() { const auto& L = feat::Layout::get(); wv.assign(2 * size_t(L.NV), 0.f); wp.assign(L.NP, 0.f); quantize(); }
+    void quantize() {
+        qv.resize(wv.size()); qp.resize(wp.size());
+        for (size_t i = 0; i < wv.size(); ++i) qv[i] = int32_t(std::lround(wv[i] * scale * 16));
+        for (size_t i = 0; i < wp.size(); ++i) qp[i] = int32_t(std::lround(wp[i] * 256));
+    }
 
     float valueLogit(const Board& b) const {
         float s0 = 0, s1 = 0;
@@ -58,6 +67,7 @@ public:
                   std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
                   std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
         std::fclose(f);
+        if (ok) quantize();
         return ok;
     }
 };
@@ -69,9 +79,74 @@ inline int heuristicClassScore(int c) {
     return v[c];
 }
 
+inline const int* orbitTable() {
+    static const int* t = [] { static int a[CELLS]; for (int c = 0; c < CELLS; ++c) a[c] = feat::orbitOf(c); return a; }();
+    return t;
+}
+
+// 칸 c 의 가치 기여 (두 관점 동시) — feat::valueFeatures 의 칸 단위 항과 정확히 같은 항
+inline void Board::accCell(int c, int sign) {
+    int32_t* cc = vcache[c];
+    if (sign < 0) {                                       // 캐시된 기여를 뺀다
+        vacc[0][0] -= cc[0]; vacc[0][1] -= cc[1]; vacc[1][0] -= cc[2]; vacc[1][1] -= cc[3];
+        return;
+    }
+    const auto& L = feat::Layout::get();
+    const int32_t* q = model->qv.data();
+    const int col = cell[c];
+    int32_t r[4] = {0, 0, 0, 0};
+    if (col == EMPTY) {
+        bool near = false;
+        for (int d = 0; d < 4; ++d) near |= keyHasStone(lkey[d][c]);
+        if (near) {
+            const int32_t* cs0 = q + 2 * (L.CS + code[0][c]); const int32_t* cs1 = q + 2 * (L.CS + code[1][c]);
+            const int32_t* co0 = q + 2 * (L.CO + code[1][c]); const int32_t* co1 = q + 2 * (L.CO + code[0][c]);
+            r[0] = cs0[0] + co0[0]; r[1] = cs0[1] + co0[1];
+            r[2] = cs1[0] + co1[0]; r[3] = cs1[1] + co1[1];
+            const int a = cls[0][c], bb = cls[1][c];
+            if (a | bb) {
+                const int32_t* j0 = q + 2 * (L.J + a * CLASS_NB + bb); const int32_t* j1 = q + 2 * (L.J + bb * CLASS_NB + a);
+                r[0] += j0[0]; r[1] += j0[1]; r[2] += j1[0]; r[3] += j1[1];
+            }
+        }
+    } else {
+        const int orb = orbitTable()[c];
+        const int32_t* pb = q + 2 * (L.PSQ + (col == BLACK ? 0 : 1) * feat::NORBIT + orb);   // 흑 관점
+        const int32_t* pw = q + 2 * (L.PSQ + (col == WHITE ? 0 : 1) * feat::NORBIT + orb);   // 백 관점
+        r[0] = pb[0]; r[1] = pb[1]; r[2] = pw[0]; r[3] = pw[1];
+    }
+    cc[0] = r[0]; cc[1] = r[1]; cc[2] = r[2]; cc[3] = r[3];
+    vacc[0][0] += r[0]; vacc[0][1] += r[1]; vacc[1][0] += r[2]; vacc[1][1] += r[3];
+}
+
+inline void Board::resyncModel() {
+    vacc[0][0] = vacc[0][1] = vacc[1][0] = vacc[1][1] = 0;
+    std::memset(vcache, 0, sizeof(vcache));
+    if (!model) return;
+    const int* cells = feat::boardCells();
+    for (int m = 0; m < NMOVES; ++m) accCell(cells[m], +1);
+}
+
+inline void Board::setModel(const Model* m) { model = m; resyncModel(); }
+
 inline int Board::evaluate() const {
     if (model) {
-        float v = model->valueLogit(*this) * model->scale;
+        // 칸 단위 항은 증분 누적값, 전역 항(주도권·개수·차례·진행)만 여기서 더한다
+        const auto& L = feat::Layout::get();
+        const int32_t* q = model->qv.data();
+        const int P = side - 1, s = P, o = 1 - P;
+        int32_t s0 = vacc[P][0], s1 = vacc[P][1];
+        auto add = [&](int i) { s0 += q[2 * i]; s1 += q[2 * i + 1]; };
+        add(L.INIT + bestClass(side) * CLASS_NB + bestClass(opp(side)));
+        for (int t = 0; t < 2; ++t) {
+            const int* cnt = clsCnt[t == 0 ? s : o];
+            for (int k = C_TWO; k <= C_FIVE; ++k)
+                if (cnt[k]) add(L.CNT + (t * CLASS_NB + k) * 3 + std::min(cnt[k], 3) - 1);
+        }
+        add(L.BIAS + (side == WHITE));
+        add(L.PH + std::min(ply / 16, 14));
+        const float t = feat::taper(*this);
+        float v = (float(s0) * (1 - t) + float(s1) * t) / 16.f;
         const float lim = float(ab::MATE_BOUND - 1);
         v = std::max(-lim, std::min(lim, v));
         return int(std::lround(v));
@@ -137,44 +212,73 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
     const int tc = model ? feat::threatClass(*this) : 0;
     int defs[NMOVES], nd = 0;
     if (oppThreat()) nd = defenseMoves(defs);           // 위협 상태: 방어수/맞받기 4 만
-    for (int m = 0; m < NMOVES; ++m) {
-        const int c = cells[m];
-        if (!isCandidate(c)) continue;
-        if (nd && std::find(defs, defs + nd, m) == defs + nd) continue;
-        const float sc = model ? model->policyScore(*this, c, tc)
-                               : float(heuristicClassScore(cls[s][c]) * 2 + heuristicClassScore(cls[o][c])) * 0.05f;
-        out[n] = m;
-        score[n] = int(sc * 256);
-        tactical[n] = nd > 0 || cls[s][c] >= C_DOUBLE3 || cls[o][c] >= C_DOUBLE3;
-        ++n;
+    if (nd) {
+        for (int i = 0; i < nd; ++i) { out[i] = defs[i]; tactical[i] = 1; }
+        n = nd;
+    } else {
+        for (int w = 0; w < 4; ++w)
+            for (uint64_t bits = candBits[w]; bits; bits &= bits - 1) {
+                const int m = w * 64 + __builtin_ctzll(bits);
+                const int c = cells[m];
+                out[n] = m;
+                tactical[n] = cls[s][c] >= C_DOUBLE3 || cls[o][c] >= C_DOUBLE3;
+                ++n;
+            }
+    }
+    if (model) {
+        const auto& L = feat::Layout::get();
+        const int32_t* q = model->qp.data();
+        const int* pj = q + L.PJ + tc * CLASS_NB * CLASS_NB;
+        const int l1 = lastMove(0), l2 = lastMove(1);
+        const int* orb = orbitTable();
+        for (int i = 0; i < n; ++i) {
+            const int c = cells[out[i]];
+            score[i] = q[L.PCS + code[s][c]] + q[L.PCO + code[o][c]] + q[L.PPSQ + orb[c]] + pj[cls[s][c] * CLASS_NB + cls[o][c]] + q[L.PD1 + feat::distBucket(c, l1)] + q[L.PD2 + feat::distBucket(c, l2)];
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            const int c = cells[out[i]];
+            score[i] = (heuristicClassScore(cls[s][c]) * 2 + heuristicClassScore(cls[o][c])) * 13;
+        }
     }
     return n;
 }
 
 // 위협 상태의 방어수: 실제로 두어 보고 상대의 4-3/승리 4 급소가 모두 사라지는 수 + 우리 4(맞받기)
 inline int Board::defenseMoves(int* out) const {
-    Board& b = const_cast<Board&>(*this);                // make/undo 는 상태를 정확히 복원한다
-    const int s = side - 1, o = 2 - side;
+    // 우리 돌 하나가 상대의 4-3/승리 4 급소 t 를 없애려면 t 를 직접 차지하거나 t 를 지나는 줄 위(±4)에 놓여
+    // 그 줄의 단계를 떨어뜨려야 한다. 줄 키 하나만 고쳐 t 의 등급을 다시 찾아보면 실제로 둬 보는 것과 같은 판정.
+    const auto& T = LineTables::get();
+    const int s = side - 1, o = 2 - side, ocol = o + 1;
     const int* cells = feat::boardCells();
-    // 시험 후보: 상대 위협 칸(4-3/승리 4)을 지나는 4방향 줄 ±4 칸 (+ 우리 4 맞받기는 별도)
-    bool mark[CELLS] = {};
+    int thr[NMOVES], nt = 0;
     for (int m = 0; m < NMOVES; ++m) {
         const int t = cells[m];
-        if (cell[t] != EMPTY || (cls[o][t] != C_FOUR3 && cls[o][t] != C_WINFOUR)) continue;
-        mark[t] = true;
-        for (int d = 0; d < 4; ++d)
-            for (int k = -4; k <= 4; ++k) { const int q = t + k * DIRS[d]; if (cell[q] == EMPTY) mark[q] = true; }
+        if (cell[t] == EMPTY && (cls[o][t] == C_FOUR3 || cls[o][t] == C_WINFOUR)) thr[nt++] = t;
     }
+    auto neutralizes = [&](int c) {
+        for (int i = 0; i < nt; ++i) {
+            const int t = thr[i];
+            if (t == c) continue;                                   // 급소를 직접 차지
+            const int dx = cellX(c) - cellX(t), dy = cellY(c) - cellY(t);
+            int d = -1, k = 0;
+            if (dy == 0) { d = 0; k = dx; } else if (dx == 0) { d = 1; k = dy; }
+            else if (dx == dy) { d = 2; k = dx; } else if (dx == -dy) { d = 3; k = dy; }
+            if (d < 0 || k < -4 || k > 4) return false;             // 이 급소의 줄과 무관 → 위협이 남는다
+            uint16_t key = uint16_t(lkey[d][t] | (side << (2 * slotOf(k))));
+            if (ocol != BLACK) key = T.swapKey[key];
+            uint8_t lv4[4] = {lv[o][0][t], lv[o][1][t], lv[o][2][t], lv[o][3][t]};
+            lv4[d] = T.level[key];
+            const int cl = T.classOf[T.code[lv4[0]][lv4[1]][lv4[2]][lv4[3]]];
+            if (cl == C_FOUR3 || cl == C_WINFOUR) return false;
+        }
+        return true;
+    };
     int n = 0;
     for (int m = 0; m < NMOVES; ++m) {
         const int c = cells[m];
         if (cell[c] != EMPTY) continue;
-        if (cls[s][c] >= C_FOUR) { out[n++] = m; continue; }       // 4 로 맞받기 (상대는 막아야 함)
-        if (!mark[c]) continue;
-        b.make(m);
-        const bool ok = b.clsCnt[o][C_FOUR3] + b.clsCnt[o][C_WINFOUR] == 0;
-        b.undo(m);
-        if (ok) out[n++] = m;
+        if (cls[s][c] >= C_FOUR || neutralizes(c)) out[n++] = m;   // 4 맞받기 또는 모든 급소 제거
     }
     return n;
 }
@@ -193,6 +297,84 @@ inline int Board::forcingMoves(int* out, bool allowThree) const {
         for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == k) out[n++] = m;
     }
     return n;
+}
+
+// ── VCF 탐색기 ──
+// 우리: 4 를 만드는 수만 둔다. 상대: 우리 5목 자리를 막는 것 외엔 선택이 없다.
+// 상대가 막으면서 자기 4(5목 위협)를 만들면 이 단순 VCF 는 그 갈래를 실패로 본다.
+// 비용 관리: 호출당 노드 한도 + "VCF 없음"으로 확인된 국면을 기억하는 실패 해시.
+struct VcfCache {
+    static constexpr int BITS = 18;
+    uint64_t keys[1 << BITS] = {};
+    static VcfCache& get() { static thread_local VcfCache c; return c; }
+    bool knownFail(uint64_t k) const { return keys[k & ((1 << BITS) - 1)] == k; }
+    void markFail(uint64_t k) { keys[k & ((1 << BITS) - 1)] = k; }
+};
+
+namespace detail {
+inline bool vcfRec(Board& b, int left, int off, int& dist, int& budget) {
+    const int s = b.side - 1, o = 2 - b.side;
+    if (b.clsCnt[s][C_FIVE]) { dist = off + 1; return true; }
+    if (b.clsCnt[o][C_FIVE]) return false;
+    if (b.clsCnt[s][C_WINFOUR]) { dist = off + 3; return true; }   // 열린 4/쌍사: 막을 수 없다
+    if (left < 2) return false;
+    const int* S = b.clsCnt[s];
+    if (!(S[C_FOUR] + S[C_FOUR_PLUS] + S[C_FOUR3])) return false;
+    const uint64_t key = b.key() ^ (uint64_t(left) * 0x9E3779B97F4A7C15ull);
+    auto& cache = VcfCache::get();
+    if (cache.knownFail(key)) return false;
+    const int* cells = feat::boardCells();
+    int mv[64], n = 0;
+    for (int w = 0; w < 4 && n < 64; ++w)
+        for (uint64_t bits = b.candBits[w]; bits && n < 64; bits &= bits - 1) {
+            const int m = w * 64 + __builtin_ctzll(bits);
+            const int k = b.cls[s][cells[m]];
+            if (k == C_FOUR3) mv[n++] = m | 0x10000;               // 4-3 을 먼저
+            else if (k == C_FOUR || k == C_FOUR_PLUS) mv[n++] = m;
+        }
+    std::sort(mv, mv + n, [](int x, int y) { return x > y; });
+    for (int i = 0; i < n; ++i) {
+        if (--budget < 0) return false;                         // 한도 초과: 판정 보류 (실패로 기억하지 않음)
+        const int m = mv[i] & 0xffff, c = toCell(m);
+        b.make(m);
+        int blk = -1;                                           // 상대의 유일한 응수: 우리 5목 자리
+        for (int d = 0; d < 4 && blk < 0; ++d)
+            for (int k = -4; k <= 4; ++k) {
+                const int q = c + k * DIRS[d];
+                if (k && b.cell[q] == EMPTY && b.cls[s][q] == C_FIVE) { blk = q; break; }
+            }
+        bool ok = false;
+        if (blk >= 0 && !b.clsCnt[o][C_FIVE]) {
+            const int bm = toMove(blk);
+            b.make(bm);
+            ok = vcfRec(b, left - 2, off + 2, dist, budget);
+            b.undo(bm);
+        }
+        b.undo(m);
+        if (ok) return true;
+    }
+    if (budget >= 0) cache.markFail(key);
+    return false;
+}
+} // namespace detail
+
+inline int g_vcfBudget = 200;   // VCF 1회 호출당 착수 한도 (튜닝용)
+inline int g_vcfMaxPly = 20;
+
+inline bool Board::vcfWin(int maxPly, int& dist) const {
+    Board& b = const_cast<Board&>(*this);
+    const bool l0 = b.light; b.light = true;                     // 패턴만 갱신
+    int budget = g_vcfBudget;
+    const bool r = detail::vcfRec(b, maxPly, 0, dist, budget);
+    b.light = l0;
+    return r;
+}
+
+inline bool Board::vcfProbe(int plyFromRoot, int& score) const {
+    int dist;
+    if (oppFive() || !vcfWin(g_vcfMaxPly, dist)) return false;
+    score = ab::MATE - (plyFromRoot + dist);
+    return true;
 }
 
 } // namespace gmk

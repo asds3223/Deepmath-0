@@ -138,7 +138,7 @@ struct Report {
 };
 
 inline void evalSet(const Model& mdl, const std::vector<Record>& recs, Report& rep, bool policy = true) {
-    Board b; b.model = &mdl;
+    Board b;   // 지표는 모델 직접 호출 (증분 상태 불필요)
     int moves[NMOVES]; float tgt[NMOVES], sc[NMOVES];
     std::vector<float> go, gb, gn; uint32_t curGroup = 0;
     auto flush = [&] { rep.rank.addGroup(go, gb, gn); go.clear(); gb.clear(); gn.clear(); };

@@ -57,6 +57,9 @@ template <class P, class = void> struct HasScored : std::false_type {};
 template <class P>
 struct HasScored<P, std::void_t<decltype(std::declval<const P&>().generateScored((int*)nullptr, (int*)nullptr, (uint8_t*)nullptr))>>
     : std::true_type {};
+template <class P, class = void> struct HasVCF : std::false_type {};
+template <class P>
+struct HasVCF<P, std::void_t<decltype(std::declval<const P&>().vcfProbe(0, std::declval<int&>()))>> : std::true_type {};
 template <class P, class = void> struct HasQuiesce : std::false_type {};
 template <class P>
 struct HasQuiesce<P, std::void_t<decltype(std::declval<const P&>().forcingMoves((int*)nullptr, false)),
@@ -143,6 +146,8 @@ struct Config {
     // ── mustDefend/forcingMoves 가 있을 때 ──
     bool useQuiesce    = true;
     int  qMaxPly       = 6;
+    int  softTimePct   = 50;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음
+    bool useVCF        = true;  // vcfProbe 가 있으면 정지 탐색에서 기준값 전에 연속 4 강제승 판정
     int  qThreePly     = 0;     // 정지 탐색 앞쪽 몇 수까지 열린 3 공격을 포함할지
 };
 
@@ -216,7 +221,7 @@ public:
             // 강제승/패가 확정되고 그 수순 길이만큼 읽었으면 종료
             if (std::abs(s) >= MATE_BOUND && d >= MATE - std::abs(s)) break;
             // 소프트 리밋: 다음 반복을 끝낼 가망이 없으면 시작하지 않음
-            if (lim.timeMs >= 0 && elapsedMs() * 2 > lim.timeMs) break;
+            if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
         }
         res.nodes = nodes_; res.timeMs = elapsedMs();
         return res;
@@ -403,6 +408,10 @@ private:
             best = -INF;
             if (n == 0) return -(MATE - ply - 3);
         } else {
+            if constexpr (detail::HasVCF<P>::value) {
+                int vs;
+                if (cfg.useVCF && qply == 0 && pos.vcfProbe(ply, vs)) return vs;   // 정지 탐색 진입점에서만
+            }
             const int stand = pos.evaluate();
             if (stand >= beta || qply >= cfg.qMaxPly) return stand;
             if (stand > alpha) alpha = stand;

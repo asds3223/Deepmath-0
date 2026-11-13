@@ -58,9 +58,16 @@ public:
     int      side = BLACK;
     uint64_t hash = 0;
 
-    const Model* model = nullptr;
+    const Model* model = nullptr;     // 직접 대입하지 말고 setModel() 을 쓸 것 (증분 상태 재동기화)
+
+    // ── 증분 평가 상태 (model 이 붙어 있을 때만 유지) ──
+    int32_t  vacc[2][2];              // [관점 P(0=흑이 self)][테이퍼 세트] 칸 단위 가치 합 (점수×16)
+    uint64_t candBits[4];             // 후보 칸 비트셋 (수 인덱스)
+    bool     light = false;           // true 면 make/undo 가 패턴만 갱신 (방어 판정용 시험 착수)
+    int32_t  vcache[CELLS][4];        // 칸별 현재 가치 기여 캐시 [P0s0, P0s1, P1s0, P1s1] (뺄 때 재계산 생략)
 
     Board() { clear(); }
+    void setModel(const Model* m);    // eval.hpp
 
     void clear() {
         const auto& T = LineTables::get();
@@ -88,6 +95,8 @@ public:
         }
         ply = 0; side = BLACK; hash = 0;
         hist[0] = -1; fiveMade[0] = 0;
+        std::memset(candBits, 0, sizeof(candBits));
+        resyncModel();
     }
 
     // ── alphabeta 인터페이스 ──
@@ -116,6 +125,9 @@ public:
     bool oppThreat() const { const int* O = clsCnt[2 - side]; return O[C_FOUR3] + O[C_WINFOUR] > 0; }
     bool mustDefend() const { return oppFive(); }                           // 정지 탐색 강제 방어: 상대 4 만
     int  defenseMoves(int* out) const;                                     // eval.hpp
+    // VCF(연속 4) 강제승 판정: 둘 차례가 4 만 계속 두어 이길 수 있으면 true, dist = 승리까지 수 (eval.hpp)
+    bool vcfWin(int maxPly, int& dist) const;
+    bool vcfProbe(int plyFromRoot, int& score) const;
     int  forcingMoves(int* out, bool allowThree) const;                    // eval.hpp: 4 (+열린 3) 만드는 수
 
     // 리프에서 정확히 판정 가능한 전술 상황
@@ -163,6 +175,25 @@ public:
     }
 
 private:
+    // eval.hpp 에서 정의: 칸 c 의 가치 기여를 두 관점 누적값에 ±, 전체 재동기화
+    void accCell(int c, int sign);
+    void resyncModel();
+    static const int16_t* moveOfCell() {
+        static const int16_t* t = [] { static int16_t a[CELLS]; for (int c = 0; c < CELLS; ++c) a[c] = int16_t(toMove(c)); return a; }();
+        return t;
+    }
+    void setCandBit(int q, bool on) {
+        const int m = moveOfCell()[q];
+        if (on) candBits[m >> 6] |= 1ull << (m & 63); else candBits[m >> 6] &= ~(1ull << (m & 63));
+    }
+    // 착수/제거로 패턴이 바뀌는 칸: 자기 자신 + 4방향 ±4 의 빈칸
+    int affected(int c, int* out) const {
+        int n = 0; out[n++] = c;
+        for (int d = 0; d < 4; ++d)
+            for (int k = -4; k <= 4; ++k) { if (!k) continue; const int q = c + k * DIRS[d]; if (cell[q] == EMPTY) out[n++] = q; }
+        return n;
+    }
+
     void setLevels(int c, int d, const LineTables& T) {
         lv[0][d][c] = T.level[lkey[d][c]];
         lv[1][d][c] = T.level[T.swapKey[lkey[d][c]]];
@@ -175,6 +206,9 @@ private:
     }
     void put(int c, int col) {
         const auto& T = LineTables::get();
+        int aff[40], na = 0;
+        const bool inc = model && !light;
+        if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
         clsCnt[0][cls[0][c]]--; clsCnt[1][cls[1][c]]--;
         cls[0][c] = cls[1][c] = C_NONE;
         cell[c] = uint8_t(col);
@@ -186,10 +220,18 @@ private:
                 lkey[d][q] |= uint16_t(col << (2 * slotOf(-k)));
                 if (cell[q] == EMPTY) updateLine(q, d, T);
             }
-        for (int o : nearOffsets()) { const int q = c + o; if (q >= 0 && q < CELLS) nearCnt[q]++; }
+        for (int o : nearOffsets()) {                          // 주변 돌 수가 0→1 이 되는 빈칸만 후보 비트를 켠다
+            const int q = c + o;
+            if (q >= 0 && q < CELLS && nearCnt[q]++ == 0 && cell[q] == EMPTY) setCandBit(q, true);
+        }
+        setCandBit(c, false);
+        if (inc) { for (int i = 0; i < na; ++i) accCell(aff[i], +1); }
     }
     void remove(int c) {
         const auto& T = LineTables::get();
+        int aff[40], na = 0;
+        const bool inc = model && !light;
+        if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
         const int col = cell[c];
         cell[c] = EMPTY;
         hash ^= Zobrist::get().z[col][c];
@@ -203,7 +245,12 @@ private:
         for (int d = 0; d < 4; ++d) setLevels(c, d, T);
         refreshCell(c, T);
         clsCnt[0][cls[0][c]]++; clsCnt[1][cls[1][c]]++;
-        for (int o : nearOffsets()) { const int q = c + o; if (q >= 0 && q < CELLS) nearCnt[q]--; }
+        for (int o : nearOffsets()) {                          // 1→0 이 되는 빈칸만 후보 비트를 끈다
+            const int q = c + o;
+            if (q >= 0 && q < CELLS && --nearCnt[q] == 0 && cell[q] == EMPTY) setCandBit(q, false);
+        }
+        if (nearCnt[c] > 0) setCandBit(c, true);
+        if (inc) { for (int i = 0; i < na; ++i) accCell(aff[i], +1); }
     }
     void updateLine(int q, int d, const LineTables& T) {
         clsCnt[0][cls[0][q]]--; clsCnt[1][cls[1][q]]--;
@@ -214,3 +261,6 @@ private:
 };
 
 } // namespace gmk
+
+// 증분 평가 멤버(accCell 등)의 정의가 항상 함께 들어오도록
+#include "eval.hpp"

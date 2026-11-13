@@ -23,7 +23,7 @@ struct Engine {
         if (timeLeft >= 0) t = std::min<int64_t>(t, timeLeft / 15);
         return std::max<int64_t>(30, t - 60);   // 통신/여유 마진
     }
-    void reset() { board.clear(); board.model = hasModel ? &model : nullptr; searcher.tt.clear(); searcher.clearHeuristics(); }
+    void reset() { board.clear(); board.setModel(hasModel ? &model : nullptr); searcher.tt.clear(); searcher.clearHeuristics(); }
     std::string think() {
         ab::Result r = searcher.think(board, ab::Limits{ab::MAX_PLY - 1, budgetMs(), 0});
         int m = r.bestMove;

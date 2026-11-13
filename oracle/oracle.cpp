@@ -474,6 +474,12 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     srch.cfg.forcedCost   = get(a, "fcost", srch.cfg.forcedCost);
     srch.cfg.aspDelta     = get(a, "asp", srch.cfg.aspDelta);
     srch.cfg.qThreePly    = get(a, "qthree", srch.cfg.qThreePly);
+    srch.cfg.useVCF       = get(a, "vcf", 1) != 0;
+    srch.cfg.softTimePct  = get(a, "soft", srch.cfg.softTimePct);
+    const bool diag = get(a, "diag", 0) != 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
+    double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
+    gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);
+    gmk::g_vcfMaxPly      = get(a, "vcfply", gmk::g_vcfMaxPly);
     int win = 0, draw = 0, loss = 0; long moves = 0;
     for (int pi = 0; pi < pairs; ++pi) {
         const gmk::Record& o = opens[(size_t(offset) + size_t(pi) * stride * 7919) % opens.size()];
@@ -481,13 +487,15 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
         if (seq.empty()) continue;
         for (int g = 0; g < 2; ++g) {
             Pair p; p.reset();
-            gmk::Board ob; ob.model = &mdl;
+            gmk::Board ob; ob.setModel(&mdl);
             for (int m : seq) { p.move(m); ob.make(m); }
             const int oursColor = g == 0 ? ob.side : gmk::opp(ob.side);
             srch.tt.clear(); srch.clearHeuristics();
             int result = 0;
             while (true) {
                 const bool oursTurn = ob.side == oursColor;
+                float wrBefore = -1;
+                if (diag && oursTurn) { auto v = p.rb->evaluator()->evaluateValue(*p.rb); wrBefore = v.win() + 0.5f * v.draw(); }
                 int m;
                 if (oursTurn) {
                     if (oursSearch) {
@@ -503,6 +511,14 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
                 } else m = rapfiMixed ? pickRapfiMixed(p) : pickRapfi(p, rapfiPolicy);
                 if (m < 0 || !ob.isEmptyMove(m)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { m = q; break; } }
                 p.move(m); ob.make(m); ++moves;
+                if (wrBefore >= 0 && !ob.isLoss()) {
+                    // 우리 수 직후 상대 차례 NNUE 승률 → 우리 관점 = 1 - 그 값. 손해 = 수 전 승률 - 수 후 승률
+                    auto v = p.rb->evaluator()->evaluateValue(*p.rb);
+                    const float after = 1.0f - (v.win() + 0.5f * v.draw());
+                    const float r = std::max(0.f, wrBefore - after);
+                    regSum += r; ++regN; reg05 += r > 0.05f; reg15 += r > 0.15f; reg30 += r > 0.30f;
+                    const int ph = ob.ply < 20 ? 0 : ob.ply < 40 ? 1 : 2; regByPhase[ph] += r; ++nByPhase[ph];
+                }
                 if (ob.isLoss()) { result = oursTurn ? 1 : -1; break; }
                 if (ob.isDraw()) break;
             }
@@ -512,6 +528,10 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f nnue-used=%.3f\n", win, draw, loss,
                 win + draw + loss, double(moves) / std::max(1, win + draw + loss),
                 g_mixCalls ? double(g_mixNN) / g_mixCalls : -1.0);
+    if (regN) std::printf("  regret: avg=%.4f  >0.05: %.1f%%  >0.15: %.1f%%  >0.30: %.1f%% | by phase avg (ply<20, 20-39, 40+): %.4f %.4f %.4f\n",
+                          regSum / regN, 100.0 * reg05 / regN, 100.0 * reg15 / regN, 100.0 * reg30 / regN,
+                          nByPhase[0] ? regByPhase[0] / nByPhase[0] : 0, nByPhase[1] ? regByPhase[1] / nByPhase[1] : 0,
+                          nByPhase[2] ? regByPhase[2] / nByPhase[2] : 0);
     if (oMoves) std::printf("  ours:  %.0f nodes/move, %.1f ms/move\n", double(oNodes) / oMoves, oMs / oMoves);
     if (g_rsMoves) std::printf("  rapfi: %.0f nodes/move, %.1f ms/move\n", double(g_rsNodes) / g_rsMoves, g_rsMs / g_rsMoves);
     return 0;

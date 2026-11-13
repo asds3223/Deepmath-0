@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     for (int p = 0; p < pairs; ++p) {
         const Record& o = opens[(size_t(offset) + size_t(p) * stride * 7919) % opens.size()];
         for (int g = 0; g < 2; ++g) {
-            Board ba, bb; ba.model = &ma; bb.model = &mb;
+            Board ba, bb; ba.setModel(&ma); bb.setModel(&mb);
             o.toBoard(ba); o.toBoard(bb);
             const int colorA = g == 0 ? ba.side : opp(ba.side);
             sa.tt.clear(); sa.clearHeuristics(); sb.tt.clear(); sb.clearHeuristics();

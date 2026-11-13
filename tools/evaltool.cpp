@@ -64,6 +64,8 @@ int main(int argc, char** argv) {
         const int64_t ms = int64_t(num(a, "ms", -1));
         ab::Searcher<Board> s(size_t(num(a, "tt-mb", 64)));
         s.cfg.useQuiesce = num(a, "q", 1) != 0; s.cfg.useRPS = num(a, "rps", 1) != 0; s.cfg.usePolicyCut = num(a, "cut", 1) != 0;
+        s.cfg.useVCF = num(a, "vcf", 1) != 0;
+        g_vcfBudget = int(num(a, "vcfbudget", g_vcfBudget)); g_vcfMaxPly = int(num(a, "vcfply", g_vcfMaxPly));
         s.cfg.qThreePly = int(num(a, "qthree", s.cfg.qThreePly)); s.cfg.qMaxPly = int(num(a, "qmax", s.cfg.qMaxPly));
         s.cfg.cutGap = int(num(a, "cutgap", s.cfg.cutGap)); s.cfg.cutMinKeep = int(num(a, "cutkeep", s.cfg.cutMinKeep));
         s.cfg.rpsPerLogit = int(num(a, "rpsk", s.cfg.rpsPerLogit)); s.cfg.rpsMaxExtra = int(num(a, "rpsmax", s.cfg.rpsMaxExtra));
@@ -72,7 +74,7 @@ int main(int argc, char** argv) {
         for (const Record& r : recs) {
             if (!(r.flags & REC_HAS_SEARCH) || r.srchBest == 255) continue;
             if (n >= limit) break;
-            Board b; b.model = a.count("model") ? &mdl : nullptr; r.toBoard(b);
+            Board b; b.setModel(a.count("model") ? &mdl : nullptr); r.toBoard(b);
             s.tt.clear(); s.clearHeuristics();
             ab::Result res = s.think(b, ab::Limits{ab::MAX_PLY - 1, ms, nodes});
             ++n; agree += (res.bestMove == r.srchBest);
@@ -93,7 +95,7 @@ int main(int argc, char** argv) {
     }
     if (mode == "bench") {
         // 평가 1회 시간 + 고정 노드 탐색 속도
-        Board b; b.model = &mdl;
+        Board b; b.setModel(&mdl);
         std::vector<Record> pos;
         for (auto& r : recs) if (!(r.flags & (REC_SELF_FIVE | REC_SIBLING | REC_LEAF)) && r.ply >= 8) pos.push_back(r);
         if (pos.size() > 2000) pos.resize(2000);
@@ -128,7 +130,7 @@ int main(int argc, char** argv) {
         RecordWriter w(a.count("out") ? a["out"] : "leaves.bin");
         std::mt19937_64 rng(uint64_t(num(a, "seed", 5)));
         ab::Searcher<DumpBoard> s(32);
-        DumpBoard b; b.model = &mdl; b.rng = &rng; b.out = &w; b.prob = float(num(a, "prob", 0.002));
+        DumpBoard b; b.setModel(&mdl); b.rng = &rng; b.out = &w; b.prob = float(num(a, "prob", 0.002));
         size_t n = 0;
         for (const Record& r : recs) {
             if (n++ >= limit) break;

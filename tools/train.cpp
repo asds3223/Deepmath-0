@@ -63,7 +63,7 @@ void accumulate(const Model& mdl, const Record* recs, const Item* items, size_t 
         const uint32_t base = items[it].first, k = std::min<uint32_t>(items[it].second, 16);
         for (uint32_t i = 0; i < k; ++i) {
             const Record& r = recs[base + i];
-            Board& b = boards[i]; b.model = &mdl; r.toBoard(b);
+            Board& b = boards[i]; r.toBoard(b);   // 학습은 모델 직접 호출(증분 상태 불필요)
             float p = r.nnWinrate();
             if (o.lambda > 0 && (r.flags & REC_HAS_SEARCH) && !std::isnan(r.srchWR)) p = (1 - o.lambda) * p + o.lambda * r.srchWR;
             pt[i] = p;

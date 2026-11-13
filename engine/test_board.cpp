@@ -105,7 +105,7 @@ int main() {
     }
 
     // 평가/생성 속도 (휴리스틱 모델 없음, 0 가중치 모델)
-    Model mdl; Board b; b.model = &mdl;
+    Model mdl; Board b; b.setModel(&mdl);
     int seq[] = {112, 113, 97, 127, 98, 96, 128, 82, 111, 126};
     for (int m : seq) b.make(m);
     auto t0 = std::chrono::steady_clock::now();

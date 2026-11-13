@@ -10,6 +10,7 @@ cmake -S oracle -B build/oracle -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=cl
 cmake --build build/oracle -j"$(nproc)" | tail -1
 $CXX $FLAGS engine/test_alphabeta.cpp -o build/test_ab
 $CXX $FLAGS engine/test_board.cpp     -o build/test_board
+$CXX $FLAGS engine/test_incremental.cpp -o build/test_incremental
 $CXX $FLAGS tools/train.cpp           -o build/train
 $CXX $FLAGS tools/evaltool.cpp        -o build/evaltool
 $CXX $FLAGS engine/pbrain.cpp         -o build/pbrain-dce
