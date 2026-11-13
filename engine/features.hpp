@@ -8,15 +8,46 @@
 //   INIT  (자기 최고 등급 × 상대 최고 등급)                     — 전역 주도권
 //   CNT   칸 등급별 개수 버킷 (1, 2, 3+)                      — 위협의 양
 //   PSQ   돌 위치(D4 대칭 36궤도) × 소유                      — 위치 가치
+//   SH    빈칸의 3x3 국소 모양 (이웃 8칸, D4 대칭 동치)        — 줄로 안 이어진 형태(뭉침·날일자 등)
 //   BIAS  둘 차례 색,  PH 진행 버킷(16수 단위)
 //
 // [정책]  p(c) = Σ w_i  (후보 칸마다; 수 정렬·실현확률 깊이·후보 컷에 사용)
-//   PCS/PCO 조합 코드, PJ (전역 전술 등급 25 × 칸 등급 결합), PD1/PD2 직전 수 거리, PPSQ 위치
+//   PCS/PCO 조합 코드, PSH 3x3 국소 모양, PJ (전역 전술 등급 25 × 칸 등급 결합), PD1/PD2 직전 수 거리, PPSQ 위치
 #pragma once
 #include "board.hpp"
 #include <algorithm>
 
 namespace gmk::feat {
+
+// 3x3 모양 정규화: 8 대칭 중 최소 키로 묶어 조밀한 id
+struct ShapeCanon {
+    int id[KEY_NB];
+    int count = 0;
+    static const ShapeCanon& get() { static const ShapeCanon c; return c; }
+private:
+    ShapeCanon() {
+        int slotOf[3][3];
+        for (int j = 0; j < 8; ++j) slotOf[SHAPE_DY[j] + 1][SHAPE_DX[j] + 1] = j;
+        std::fill(id, id + KEY_NB, -1);
+        for (int k = 0; k < KEY_NB; ++k) {
+            int best = k;
+            for (int t = 0; t < 8; ++t) {
+                int v = 0;
+                for (int j = 0; j < 8; ++j) {
+                    int x = SHAPE_DX[j], y = SHAPE_DY[j];
+                    if (t & 1) x = -x;
+                    if (t & 2) y = -y;
+                    if (t & 4) std::swap(x, y);
+                    v |= ((k >> (2 * j)) & 3) << (2 * slotOf[y + 1][x + 1]);
+                }
+                best = std::min(best, v);
+            }
+            if (id[best] < 0) id[best] = count++;
+            id[k] = id[best];
+        }
+    }
+};
+inline bool g_useShape = true;   // false 면 3x3 모양 항을 쓰지 않음 (B 와 같은 특징 집합, 비교용)
 
 inline int orbitOf(int c) {       // 15x15 D4 대칭 궤도 (36개)
     int x = cellX(c), y = cellY(c);
@@ -34,8 +65,8 @@ inline int distBucket(int c, int m) {
 }
 
 struct Layout {
-    int CS, CO, J, INIT, CNT, PSQ, BIAS, PH, NV;          // value
-    int PCS, PCO, PJ, PD1, PD2, PPSQ, NP;                // policy
+    int CS, CO, J, INIT, CNT, PSQ, SH, BIAS, PH, NV;      // value
+    int PCS, PCO, PSH, PJ, PD1, PD2, PPSQ, NP;                // policy
     static const Layout& get() { static const Layout l; return l; }
 private:
     Layout() {
@@ -46,12 +77,14 @@ private:
         INIT = o; o += CLASS_NB * CLASS_NB;
         CNT = o;  o += 2 * CLASS_NB * 3;
         PSQ = o;  o += 2 * NORBIT;
+        SH = o;   o += ShapeCanon::get().count;
         BIAS = o; o += 2;
         PH = o;   o += 15;
         NV = o;
         o = 0;
         PCS = o;  o += CODE_NB;
         PCO = o;  o += CODE_NB;
+        PSH = o;  o += ShapeCanon::get().count;
         PJ = o;   o += 25 * CLASS_NB * CLASS_NB;
         PD1 = o;  o += 5;
         PD2 = o;  o += 5;
@@ -80,6 +113,8 @@ inline void valueFeatures(const Board& b, F&& emit) {
             if (!near) continue;
             emit(L.CS + b.code[s][c]);
             emit(L.CO + b.code[o][c]);
+            if (g_useShape && keyHasStone(b.sh[c]))
+                emit(L.SH + ShapeCanon::get().id[self == BLACK ? b.sh[c] : LineTables::get().swapKey[b.sh[c]]]);
             const int a = b.cls[s][c], bb = b.cls[o][c];
             if (a | bb) emit(L.J + a * CLASS_NB + bb);
         } else {
@@ -107,6 +142,7 @@ inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
     const int s = b.side - 1, o = 2 - b.side;
     emit(L.PCS + b.code[s][c]);
     emit(L.PCO + b.code[o][c]);
+    if (g_useShape) emit(L.PSH + ShapeCanon::get().id[b.side == BLACK ? b.sh[c] : LineTables::get().swapKey[b.sh[c]]]);
     emit(L.PJ + (tclass * CLASS_NB + b.cls[s][c]) * CLASS_NB + b.cls[o][c]);
     emit(L.PD1 + distBucket(c, b.lastMove(0)));
     emit(L.PD2 + distBucket(c, b.lastMove(1)));

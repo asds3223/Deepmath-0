@@ -27,6 +27,9 @@ inline int cellX(int c) { return c % W - PAD; }
 inline int cellY(int c) { return c / W - PAD; }
 inline int slotOf(int k) { return k < 0 ? k + 4 : k + 3; }      // 오프셋 → 키 슬롯
 inline bool keyHasStone(uint16_t k) { return ((k ^ (k >> 1)) & 0x5555) != 0; }
+// 3x3 이웃 순서: (-1,-1) (0,-1) (1,-1) (-1,0) (1,0) (-1,1) (0,1) (1,1) — 반대편 이웃 = 7 - j
+constexpr int SHAPE_DX[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+constexpr int SHAPE_DY[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
 class Model;   // eval.hpp
 
@@ -47,6 +50,7 @@ public:
 
     uint8_t  cell[CELLS];
     uint16_t lkey[4][CELLS];          // 절대 색 키 (0 빈,1 흑,2 백,3 벽)
+    uint16_t sh[CELLS];               // 3x3 국소 모양 키: 이웃 8칸 × 2bit (슬롯 순서 = SHAPE_OFF)
     uint8_t  lv[2][4][CELLS];         // [색-1][방향][칸] 위협 단계 (빈칸만 유효)
     uint16_t code[2][CELLS];          // 4방향 조합 코드
     uint8_t  cls[2][CELLS];           // 칸 등급
@@ -84,6 +88,15 @@ public:
                 }
                 lkey[d][c] = k;
             }
+        for (int c = 0; c < CELLS; ++c) {
+            uint16_t k = 0;
+            for (int j = 0; j < 8; ++j) {
+                const int q = c + SHAPE_DX[j] + SHAPE_DY[j] * W;
+                const int v = (q >= 0 && q < CELLS) ? cell[q] : WALL;
+                k |= uint16_t(v << (2 * j));
+            }
+            sh[c] = k;
+        }
         std::memset(nearCnt, 0, sizeof(nearCnt));
         std::memset(clsCnt, 0, sizeof(clsCnt));
         for (int c = 0; c < CELLS; ++c) {
@@ -213,6 +226,7 @@ private:
         cls[0][c] = cls[1][c] = C_NONE;
         cell[c] = uint8_t(col);
         hash ^= Zobrist::get().z[col][c];
+        for (int j = 0; j < 8; ++j) sh[c + SHAPE_DX[j] + SHAPE_DY[j] * W] |= uint16_t(col << (2 * (7 - j)));
         for (int d = 0; d < 4; ++d)
             for (int k = -4; k <= 4; ++k) {
                 if (!k) continue;
@@ -235,6 +249,7 @@ private:
         const int col = cell[c];
         cell[c] = EMPTY;
         hash ^= Zobrist::get().z[col][c];
+        for (int j = 0; j < 8; ++j) sh[c + SHAPE_DX[j] + SHAPE_DY[j] * W] &= uint16_t(~(3 << (2 * (7 - j))));
         for (int d = 0; d < 4; ++d)
             for (int k = -4; k <= 4; ++k) {
                 if (!k) continue;

@@ -12,7 +12,7 @@ namespace gmk {
 
 class Model {
 public:
-    static constexpr uint32_t MAGIC = 0x44434534;   // "DCE4"
+    static constexpr uint32_t MAGIC = 0x44434535;   // "DCE5" (3x3 모양 표 추가)
     std::vector<float> wv;      // 가치: [2*i] 초반, [2*i+1] 후반
     std::vector<float> wp;      // 정책
     float scale    = 200.f;     // 탐색 정수 점수 = 로짓 × scale
@@ -117,6 +117,12 @@ inline void Board::accCell(int c, int sign) {
             const int32_t* co0 = q + 2 * (L.CO + code[1][c]); const int32_t* co1 = q + 2 * (L.CO + code[0][c]);
             r[0] = cs0[0] + co0[0]; r[1] = cs0[1] + co0[1];
             r[2] = cs1[0] + co1[0]; r[3] = cs1[1] + co1[1];
+            if (feat::g_useShape && keyHasStone(sh[c])) {
+                const auto& SC = feat::ShapeCanon::get();
+                const int32_t* s0 = q + 2 * (L.SH + SC.id[sh[c]]);
+                const int32_t* s1 = q + 2 * (L.SH + SC.id[LineTables::get().swapKey[sh[c]]]);
+                r[0] += s0[0]; r[1] += s0[1]; r[2] += s1[0]; r[3] += s1[1];
+            }
             const int a = cls[0][c], bb = cls[1][c];
             if (a | bb) {
                 const int32_t* j0 = q + 2 * (L.J + a * CLASS_NB + bb); const int32_t* j1 = q + 2 * (L.J + bb * CLASS_NB + a);
@@ -251,7 +257,8 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
         const int* orb = orbitTable();
         for (int i = 0; i < n; ++i) {
             const int c = cells[out[i]];
-            score[i] = q[L.PCS + code[s][c]] + q[L.PCO + code[o][c]] + q[L.PPSQ + orb[c]] + pj[cls[s][c] * CLASS_NB + cls[o][c]] + q[L.PD1 + feat::distBucket(c, l1)] + q[L.PD2 + feat::distBucket(c, l2)];
+            const int shp = feat::g_useShape ? q[L.PSH + feat::ShapeCanon::get().id[side == BLACK ? sh[c] : LineTables::get().swapKey[sh[c]]]] : 0;
+            score[i] = shp + q[L.PCS + code[s][c]] + q[L.PCO + code[o][c]] + q[L.PPSQ + orb[c]] + pj[cls[s][c] * CLASS_NB + cls[o][c]] + q[L.PD1 + feat::distBucket(c, l1)] + q[L.PD2 + feat::distBucket(c, l2)];
         }
     } else {
         for (int i = 0; i < n; ++i) {

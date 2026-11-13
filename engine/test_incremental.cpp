@@ -14,7 +14,13 @@ using namespace gmk;
 int main(int argc, char** argv) {
     Model mdl;
     const char* path = argc > 1 ? argv[1] : "data/b.dce";
-    if (!mdl.load(path)) { std::fprintf(stderr, "cannot load %s\n", path); return 1; }
+    if (!mdl.load(path)) {      // 모델이 없거나 형식이 다르면 무작위 가중치로 검증 (모든 표 칸을 건드림)
+        std::mt19937 wr(11); std::uniform_real_distribution<float> U(-0.3f, 0.3f);
+        for (auto& w : mdl.wv) w = U(wr);
+        for (auto& w : mdl.wp) w = U(wr);
+        mdl.quantize();
+        std::printf("(random weights)\n");
+    }
     std::mt19937 rng(3);
     long checks = 0, valBad = 0, polBad = 0, candBad = 0, restoreBad = 0; int maxVal = 0, maxPol = 0;
     for (int g = 0; g < 200; ++g) {

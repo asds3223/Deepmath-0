@@ -163,6 +163,7 @@ int main(int argc, char** argv) {
 
     Model mdl;
     mdl.scale = float(argf(a, "scale", 200));
+    feat::g_useShape = argf(a, "shape", 1) != 0;
     if (a.count("init") && !mdl.load(a["init"])) { std::fprintf(stderr, "cannot load init model\n"); return 1; }
     Adam av, ap; av.init(mdl.wv.size()); ap.init(mdl.wp.size());
     std::vector<Grad> grads(threads);
