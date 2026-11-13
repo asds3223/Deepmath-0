@@ -32,6 +32,9 @@ int main(int argc, char** argv) {
         c.rfpDepth = g("rfp", c.rfpDepth); c.rfpMargin = g("rfpmargin", c.rfpMargin);
         c.mcpBase = g("mcp", c.mcpBase); c.mcpExp100 = g("mcpexp", c.mcpExp100);
         c.lmrAdditive = g("lmradd", c.lmrAdditive) != 0;
+        c.tacFirst = g("tacfirst", c.tacFirst) != 0;
+        c.softTimePct = g("soft", c.softTimePct);
+        c.aspDelta = g("asp", c.aspDelta);
     };
     apply(sa.cfg, "a-"); apply(sb.cfg, "b-");
     g_vcfBudget = int(num("vcf-budget", g_vcfBudget));

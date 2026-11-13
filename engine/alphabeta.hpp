@@ -165,11 +165,12 @@ struct Config {
     // ── 강한 수 개수 가지치기: (mcpBase + d^mcpExp) / (개선 없으면 2), 모든 수를 센다 (0 이면 끔) ──
     int  mcpBase       = 0;
     int  mcpExp100     = 130;
+    bool tacFirst      = false; // true 면 전술 수를 TT 수 다음(킬러보다 앞)에 확정 배치 — 수 개수 가지치기의 전제
     bool lmrAdditive   = true;  // true 면 실현 확률 감축 + 로그 감축을 더한다 (false: 큰 쪽)
     // ── mustDefend/forcingMoves 가 있을 때 ──
     bool useQuiesce    = true;
     int  qMaxPly       = 4;     // A/B 1000판: 4 가 6 보다 +24 Elo (12ms)
-    int  softTimePct   = 50;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음
+    int  softTimePct   = 75;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음 (A/B: 50→75 +22 Elo)
     bool useVCF        = false; // (기본 끔: 같은 시간 대국에서 이득 없음, 비용 ~40%) vcfProbe 가 있으면 정지 탐색에서 기준값 전에 연속 4 강제승 판정
     int  qThreePly     = 0;     // 정지 탐색 앞쪽 몇 수까지 열린 3 공격을 포함할지
 };
@@ -386,7 +387,10 @@ private:
             const int m = moves[i];
             int base = history_[side][m];
             if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
+            bool tacM = false;
+            if constexpr (scored) tacM = cfg.tacFirst && tac[i];
             order[i] = m == ttMove            ? (1 << 30)
+                     : tacM                   ? (1 << 29) + 8 + std::min(std::max(pscore[i] / 256 + 64, 0), 128) * 0 + std::min(std::max(base, 0), (1 << 20))
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
                      : m == counterMove       ? (1 << 29) - 2
@@ -411,7 +415,11 @@ private:
             moves[i] = m; order[i] = mOrder;
 
             // 강한 수 개수 가지치기: 이미 지지 않는 수를 찾았으면 한도 넘는 수는 보지 않는다
-            if (!root && i >= mcLimit && best > -MATE_BOUND && n > 1) break;
+            if (!root && i >= mcLimit && best > -MATE_BOUND && n > 1) {
+                bool t = false;
+                if constexpr (scored) t = tac[bi];
+                if (!t) continue;                                   // 전술 수는 자르지 않는다
+            }
 
             // 이 수가 소모할 깊이 (기본 1수, 실현 확률 깊이면 정책 차이만큼 추가)
             int extra = 0, cost = ONE_PLY;
