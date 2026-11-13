@@ -26,6 +26,7 @@
 #include "eval/evaluator.h"
 #include "game/board.h"
 #include "search/searchthread.h"
+#include "search/ab/searcher.h"
 
 #include <algorithm>
 #include <chrono>
@@ -537,6 +538,40 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     return 0;
 }
 
+
+// ── depthcmp: 같은 국면·같은 노드 수에서 Rapfi 와 우리 엔진의 깊이 비교 ──
+int cmdDepthCmp(const std::map<std::string, std::string>& a) {
+    gmk::Model mdl;
+    if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
+    static const std::vector<std::vector<int>> pos = {
+        {112}, {112, 128}, {112, 113, 127}, {112, 96, 98, 126},
+        {112, 113, 97, 127, 98, 96, 128, 82, 111, 126},
+        {112, 96, 128, 144, 97, 82, 113, 98, 127, 142, 111, 110},
+    };
+    std::vector<uint64_t> budgets = {10000, 100000, 1000000};
+    ab::Searcher<gmk::Board> srch(128);
+    std::printf("%-4s %-9s | %-28s | %-28s\n", "pos", "nodes", "Rapfi depth/sel  best  ms", "DCE depth/sel  best  ms");
+    for (uint64_t nb : budgets) {
+        for (size_t i = 0; i < pos.size(); ++i) {
+            Pair p; p.reset();
+            gmk::Board ob; ob.setModel(&mdl);
+            for (int m : pos[i]) { p.move(m); ob.make(m); }
+            Search::Threads.clear(true);
+            auto t0 = Clock::now();
+            SearchOut so = rapfiSearch(p, nb);
+            const double rms = secondsSince(t0) * 1000;
+            const int rdep = Search::Threads.main()->searchDataAs<Search::AB::ABSearchData>()->completedDepth;
+            srch.tt.clear(); srch.clearHeuristics();
+            ab::Result r = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, -1, nb});
+            auto c = [](int m) { return m < 0 ? std::string("--") : std::string(1, char('a' + m % 15)) + std::to_string(m / 15 + 1); };
+            std::printf("#%-3zu %-9llu | depth %2d sel %2d  %-4s %6.0f | depth %2d sel %2d  %-4s %6lld\n", i + 1,
+                        (unsigned long long)nb, rdep, so.depth, c(so.best).c_str(), rms, r.depth, r.selDepth,
+                        c(r.bestMove).c_str(), (long long)r.timeMs);
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 
@@ -553,6 +588,7 @@ int main(int argc, char** argv) {
     if (mode == "label") return cmdLabel(a);
     if (mode == "bench") return cmdBench(a);
     if (mode == "match") return cmdMatch(a);
+    if (mode == "depthcmp") return cmdDepthCmp(a);
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;
 }
