@@ -143,6 +143,12 @@ struct Config {
     bool usePolicyCut  = true;
     int  cutGap        = 1;     // 정책 1위와 로짓 차이가 이보다 크면 비전술 수는 생략
     int  cutMinKeep    = 3;     // 최소 이만큼은 탐색
+    // ── 남은 깊이별 비전술 수 예산: 남은 깊이 d 에서 keepBase + keepPerPly·d 개까지 (0 이면 끔) ──
+    int  keepBase      = 3;
+    int  keepPerPly    = 2;
+    // ── 정적 문턱: 비PV, 남은 깊이 ≤ gateDepth 에서 정적평가 + gateMargin·d ≤ alpha 면 첫 수 뒤 비전술 수 생략 ──
+    int  gateDepth     = 2;     // 0 이면 끔
+    int  gateMargin    = 150;
     // ── mustDefend/forcingMoves 가 있을 때 ──
     bool useQuiesce    = true;
     int  qMaxPly       = 6;
@@ -156,6 +162,8 @@ struct Result {
     int      score    = 0;
     int      depth    = 0;      // 완료된 마지막 반복 깊이
     int      selDepth = 0;      // 실제로 도달한 최대 수 깊이 (정지 탐색 포함)
+    uint64_t interior = 0;      // 수를 생성한 내부 노드 수
+    uint64_t searched = 0;      // 내부 노드에서 실제로 탐색한 자식 수 (searched/interior = 실효 분기)
     uint64_t nodes    = 0;
     int64_t  timeMs   = 0;
     std::vector<int> pv;
@@ -178,7 +186,7 @@ public:
     }
 
     Result think(P& pos, const Limits& lim) {
-        lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0;
+        lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0; interior_ = 0; searched_ = 0;
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
         tt.newSearch();
@@ -217,6 +225,7 @@ public:
             res.score = s; res.depth = d;
             res.pv.assign(pv_[0], pv_[0] + pvLen_[0]);
             res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = selDepth_;
+            res.interior = interior_; res.searched = searched_;
             if (onIteration) onIteration(res);
 
             // 강제승/패가 확정되고 그 수순 길이만큼 읽었으면 종료
@@ -225,6 +234,7 @@ public:
             if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
         }
         res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = std::max(res.selDepth, selDepth_);
+        res.interior = interior_; res.searched = searched_;
         return res;
     }
 
@@ -305,6 +315,17 @@ private:
             n = pos.generate(moves);
         }
         if (n == 0) return 0;
+        ++interior_;
+
+        // 정적 문턱 (비PV, 얕은 깊이): 정적평가로도 alpha 에 못 미치면 조용한 수는 첫 수 뒤 생략
+        bool gate = false;
+        if constexpr (scored) {
+            const int dPly = depth / ONE_PLY;
+            if (!pvNode && !root && cfg.gateDepth > 0 && dPly <= cfg.gateDepth && std::abs(alpha) < MATE_BOUND)
+                gate = pos.evaluate() + cfg.gateMargin * std::max(dPly, 1) <= alpha;
+        }
+        int quietSearched = 0;
+        const int keepLimit = cfg.keepBase + cfg.keepPerPly * (depth / ONE_PLY) + (pvNode ? cfg.keepBase : 0);
 
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
@@ -341,11 +362,15 @@ private:
                 if (n == 1) cost = cfg.forcedCost;
                 else if (!mTac && mOrder < (1 << 29) - 1) {
                     if (cfg.usePolicyCut && !root && i >= cfg.cutMinKeep && gap > cfg.cutGap) continue;
+                    if (!root && i > 0 && gate) continue;                                   // 정적 문턱
+                    if (!root && cfg.keepBase > 0 && quietSearched >= keepLimit) continue;  // 깊이별 예산
+                    ++quietSearched;
                     if (cfg.useRPS) extra = std::min(cfg.rpsMaxExtra, (smax - mScore) * cfg.rpsPerLogit / 256);
                 }
             }
 
             pos.make(m);
+            ++searched_;
             int s;
             if (i == 0) {
                 s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
@@ -443,6 +468,7 @@ private:
     Limits            lim_;
     uint64_t          nodes_   = 0;
     int               selDepth_ = 0;
+    uint64_t          interior_ = 0, searched_ = 0;
     bool              stopped_ = false;
     std::atomic<bool> stopFlag_{false};
     Clock::time_point start_;

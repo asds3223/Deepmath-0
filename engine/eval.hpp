@@ -208,6 +208,10 @@ inline int Board::generate(int* out) const {
     return n;
 }
 
+// 전술 수 판정 등급 (이 등급 이상을 만들거나 막는 수는 감축·컷·예산 대상에서 제외) — 튜닝용
+inline int g_tacSelf = C_DOUBLE3;
+inline int g_tacOppo = C_DOUBLE3;
+
 // 탐색용: 정렬하지 않은 후보 + 정책 점수(로짓×256) + 전술 수 표시
 //   전술 수 = 자기가 쌍삼 이상(4 포함)을 만들거나 상대의 쌍삼 이상 급소를 막는 수 → 감축·컷 대상에서 제외
 inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const {
@@ -235,7 +239,7 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
                 const int m = w * 64 + __builtin_ctzll(bits);
                 const int c = cells[m];
                 out[n] = m;
-                tactical[n] = cls[s][c] >= C_DOUBLE3 || cls[o][c] >= C_DOUBLE3;
+                tactical[n] = cls[s][c] >= g_tacSelf || cls[o][c] >= g_tacOppo;
                 ++n;
             }
     }

@@ -475,8 +475,14 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     srch.cfg.forcedCost   = get(a, "fcost", srch.cfg.forcedCost);
     srch.cfg.aspDelta     = get(a, "asp", srch.cfg.aspDelta);
     srch.cfg.qThreePly    = get(a, "qthree", srch.cfg.qThreePly);
-    srch.cfg.useVCF       = get(a, "vcf", 1) != 0;
+    srch.cfg.useVCF       = get(a, "vcf", 0) != 0;
     srch.cfg.softTimePct  = get(a, "soft", srch.cfg.softTimePct);
+    srch.cfg.keepBase     = get(a, "keepbase", srch.cfg.keepBase);
+    srch.cfg.keepPerPly   = get(a, "keepply", srch.cfg.keepPerPly);
+    srch.cfg.gateDepth    = get(a, "gate", srch.cfg.gateDepth);
+    srch.cfg.gateMargin   = get(a, "gatemargin", srch.cfg.gateMargin);
+    gmk::g_tacSelf        = get(a, "tacself", gmk::g_tacSelf);
+    gmk::g_tacOppo        = get(a, "tacoppo", gmk::g_tacOppo);
     const bool diag = get(a, "diag", 0) != 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
     gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);

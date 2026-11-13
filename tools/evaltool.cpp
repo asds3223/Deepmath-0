@@ -64,13 +64,16 @@ int main(int argc, char** argv) {
         const int64_t ms = int64_t(num(a, "ms", -1));
         ab::Searcher<Board> s(size_t(num(a, "tt-mb", 64)));
         s.cfg.useQuiesce = num(a, "q", 1) != 0; s.cfg.useRPS = num(a, "rps", 1) != 0; s.cfg.usePolicyCut = num(a, "cut", 1) != 0;
-        s.cfg.useVCF = num(a, "vcf", 1) != 0;
+        s.cfg.useVCF = num(a, "vcf", 0) != 0;
+        s.cfg.keepBase = int(num(a, "keepbase", s.cfg.keepBase)); s.cfg.keepPerPly = int(num(a, "keepply", s.cfg.keepPerPly));
+        s.cfg.gateDepth = int(num(a, "gate", s.cfg.gateDepth)); s.cfg.gateMargin = int(num(a, "gatemargin", s.cfg.gateMargin));
+        g_tacSelf = int(num(a, "tacself", g_tacSelf)); g_tacOppo = int(num(a, "tacoppo", g_tacOppo));
         g_vcfBudget = int(num(a, "vcfbudget", g_vcfBudget)); g_vcfMaxPly = int(num(a, "vcfply", g_vcfMaxPly));
         s.cfg.qThreePly = int(num(a, "qthree", s.cfg.qThreePly)); s.cfg.qMaxPly = int(num(a, "qmax", s.cfg.qMaxPly));
         s.cfg.cutGap = int(num(a, "cutgap", s.cfg.cutGap)); s.cfg.cutMinKeep = int(num(a, "cutkeep", s.cfg.cutMinKeep));
         s.cfg.rpsPerLogit = int(num(a, "rpsk", s.cfg.rpsPerLogit)); s.cfg.rpsMaxExtra = int(num(a, "rpsmax", s.cfg.rpsMaxExtra));
         size_t n = 0, agree = 0, verdictAgree = 0; double depthSum = 0, nodeSum = 0, msSum = 0;
-        size_t rWin = 0, rWinFound = 0, rLoss = 0, rLossFound = 0;
+        size_t rWin = 0, rWinFound = 0, rLoss = 0, rLossFound = 0; double intSum = 0, srchSum = 0;
         for (const Record& r : recs) {
             if (!(r.flags & REC_HAS_SEARCH) || r.srchBest == 255) continue;
             if (n >= limit) break;
@@ -83,12 +86,13 @@ int main(int argc, char** argv) {
             verdictAgree += ((ourWR - 0.5f) * (r.srchWR - 0.5f) >= 0);
             if (r.srchWR >= 0.999f) { ++rWin; rWinFound += res.score >= ab::MATE_BOUND; }
             if (r.srchWR <= 0.001f) { ++rLoss; rLossFound += res.score <= -ab::MATE_BOUND; }
-            depthSum += res.depth; nodeSum += res.nodes; msSum += res.timeMs;
+            depthSum += res.depth; nodeSum += res.nodes; msSum += res.timeMs; intSum += res.interior; srchSum += res.searched;
         }
         if (!n) { std::printf("no search-labelled records\n"); return 0; }
         std::printf("[search] n=%zu bestmove-agree=%.3f verdict-agree=%.3f avg-depth=%.2f avg-nodes=%.0f avg-ms=%.1f nps=%.0f\n",
                     n, double(agree) / n, double(verdictAgree) / n, depthSum / n, nodeSum / n, msSum / n,
                     msSum > 0 ? nodeSum / (msSum / 1000) : 0);
+        std::printf("[search] branching: searched/interior=%.2f\n", intSum > 0 ? srchSum / intSum : 0);
         std::printf("[search] Rapfi-says-WIN n=%zu ours-found-mate=%.3f | Rapfi-says-LOSS n=%zu ours-found-mated=%.3f\n",
                     rWin, rWin ? double(rWinFound) / rWin : 0, rLoss, rLoss ? double(rLossFound) / rLoss : 0);
         return 0;
