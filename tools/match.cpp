@@ -20,6 +20,9 @@ int main(int argc, char** argv) {
     const int pairs = int(num("pairs", 20)), offset = int(num("offset", 0)), stride = int(num("stride", 1));
     const int64_t ms = int64_t(num("ms", 100));
     ab::Searcher<Board> sa(64), sb(64);
+    sa.cfg.useVCF = num("a-vcf", 0) != 0;      // 양쪽 탐색 설정을 따로 (VCF 켬/끔 비교용)
+    sb.cfg.useVCF = num("b-vcf", 0) != 0;
+    g_vcfBudget = int(num("vcf-budget", g_vcfBudget));
     int win = 0, draw = 0, loss = 0; double na = 0, ta = 0, nb = 0, tb = 0; long movesTotal = 0;
     for (int p = 0; p < pairs; ++p) {
         const Record& o = opens[(size_t(offset) + size_t(p) * stride * 7919) % opens.size()];
