@@ -136,7 +136,8 @@ public:
     // 위협 상태에서는 위협을 실제로 없애는 수와 우리 4(맞받기)만 의미가 있다 (체스의 체크 회피와 같은 취급).
     bool oppFive() const   { return clsCnt[2 - side][C_FIVE] > 0; }
     bool oppThreat() const { const int* O = clsCnt[2 - side]; return O[C_FOUR3] + O[C_WINFOUR] > 0; }
-    bool mustDefend() const { return oppFive(); }                           // 정지 탐색 강제 방어: 상대 4 만
+    bool mustDefend() const { return oppFive(); }
+    bool quietNode() const { return !oppFive() && !oppThreat() && !clsCnt[side - 1][C_FIVE]; }   // 전술 위기 없음                           // 정지 탐색 강제 방어: 상대 4 만
     int  defenseMoves(int* out) const;                                     // eval.hpp
     // VCF(연속 4) 강제승 판정: 둘 차례가 4 만 계속 두어 이길 수 있으면 true, dist = 승리까지 수 (eval.hpp)
     bool vcfWin(int maxPly, int& dist) const;

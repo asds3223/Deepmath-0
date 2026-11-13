@@ -501,6 +501,11 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     srch.cfg.useIIR       = get(a, "iir", 1) != 0;
     srch.cfg.useImproving = get(a, "impr", 1) != 0;
     srch.cfg.useCounter   = get(a, "cm", 1) != 0;
+    srch.cfg.rfpDepth     = get(a, "rfp", srch.cfg.rfpDepth);
+    srch.cfg.rfpMargin    = get(a, "rfpmargin", srch.cfg.rfpMargin);
+    srch.cfg.mcpBase      = get(a, "mcp", srch.cfg.mcpBase);
+    srch.cfg.mcpExp100    = get(a, "mcpexp", srch.cfg.mcpExp100);
+    srch.cfg.lmrAdditive  = get(a, "lmradd", srch.cfg.lmrAdditive) != 0;
     const bool diag = get(a, "diag", 0) != 0 && get(a, "rapfi-classical", 0) == 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
     gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);

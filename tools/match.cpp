@@ -29,6 +29,9 @@ int main(int argc, char** argv) {
         c.qMaxPly = g("qmax", c.qMaxPly); c.cutGap = g("cutgap", c.cutGap); c.cutMinKeep = g("cutkeep", c.cutMinKeep);
         c.rpsPerLogit = g("rpsk", c.rpsPerLogit); c.keepBase = g("keepbase", c.keepBase); c.keepPerPly = g("keepply", c.keepPerPly);
         c.gateDepth = g("gate", c.gateDepth); c.gateMargin = g("gatemargin", c.gateMargin);
+        c.rfpDepth = g("rfp", c.rfpDepth); c.rfpMargin = g("rfpmargin", c.rfpMargin);
+        c.mcpBase = g("mcp", c.mcpBase); c.mcpExp100 = g("mcpexp", c.mcpExp100);
+        c.lmrAdditive = g("lmradd", c.lmrAdditive) != 0;
     };
     apply(sa.cfg, "a-"); apply(sb.cfg, "b-");
     g_vcfBudget = int(num("vcf-budget", g_vcfBudget));

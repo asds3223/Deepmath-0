@@ -61,6 +61,9 @@ struct HasScored<P, std::void_t<decltype(std::declval<const P&>().generateScored
 template <class P, class = void> struct HasVCF : std::false_type {};
 template <class P>
 struct HasVCF<P, std::void_t<decltype(std::declval<const P&>().vcfProbe(0, std::declval<int&>()))>> : std::true_type {};
+template <class P, class = void> struct HasQuiet : std::false_type {};
+template <class P>
+struct HasQuiet<P, std::void_t<decltype(std::declval<const P&>().quietNode())>> : std::true_type {};
 template <class P, class = void> struct HasQuiesce : std::false_type {};
 template <class P>
 struct HasQuiesce<P, std::void_t<decltype(std::declval<const P&>().forcingMoves((int*)nullptr, false)),
@@ -151,11 +154,18 @@ struct Config {
     int  gateDepth     = 2;     // 0 이면 끔
     int  gateMargin    = 150;
     // ── 로그형 늦은 수 감축: r = lmrBase + ln(d)·ln(i)/lmrDiv (×ONE_PLY, 0 이면 끔) ──
-    int  lmrBase100    = 50;    // ×0.01 수
-    int  lmrDiv100     = 250;   // ×0.01
+    int  lmrBase100    = 0;     // ×0.01 수
+    int  lmrDiv100     = 100;   // ×0.01
     bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
     bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
     bool useCounter    = true;  // 상대 직전 수에 대한 반박수 기억
+    // ── 역방향 정적 가지치기: 비PV·위협 없음·남은 깊이 ≤ rfpDepth 에서 정적평가 - rfpMargin·(d - improving) ≥ beta 면 즉시 반환 ──
+    int  rfpDepth      = 5;     // 0 이면 끔 (A/B: +53~60 Elo)
+    int  rfpMargin     = 60;
+    // ── 강한 수 개수 가지치기: (mcpBase + d^mcpExp) / (개선 없으면 2), 모든 수를 센다 (0 이면 끔) ──
+    int  mcpBase       = 0;
+    int  mcpExp100     = 130;
+    bool lmrAdditive   = true;  // true 면 실현 확률 감축 + 로그 감축을 더한다 (false: 큰 쪽)
     // ── mustDefend/forcingMoves 가 있을 때 ──
     bool useQuiesce    = true;
     int  qMaxPly       = 4;     // A/B 1000판: 4 가 6 보다 +24 Elo (12ms)
@@ -321,6 +331,21 @@ private:
         if constexpr (detail::HasScored<P>::value)
             if (cfg.useIIR && cfg.useTT && !root && ttMove == NO_MOVE && depth >= 4 * ONE_PLY) depth -= ONE_PLY;
 
+        // ── 정적평가 / improving / 역방향 정적 가지치기 (수 생성 전) ──
+        bool improving = true;
+        int se = 0;
+        if constexpr (detail::HasScored<P>::value) {
+            se = pos.evaluate();
+            evalStack_[ply] = se;
+            if (cfg.useImproving && ply >= 2) improving = se > evalStack_[ply - 2];
+            bool quiet = true;
+            if constexpr (detail::HasQuiet<P>::value) quiet = pos.quietNode();
+            const int dPly = depth / ONE_PLY;
+            if (cfg.rfpDepth > 0 && !pvNode && !root && quiet && dPly <= cfg.rfpDepth && std::abs(beta) < MATE_BOUND &&
+                se - cfg.rfpMargin * std::max(dPly - (improving ? 1 : 0), 0) >= beta)
+                return se;
+        }
+
         // ── 수 생성 및 정렬 점수 ──
         int moves[P::NUM_MOVES];
         int order[P::NUM_MOVES];
@@ -338,12 +363,9 @@ private:
         ++interior_;
 
         // 정적 문턱 (비PV, 얕은 깊이): 정적평가로도 alpha 에 못 미치면 조용한 수는 첫 수 뒤 생략
-        bool gate = false, improving = true;
+        bool gate = false;
         if constexpr (scored) {
             const int dPly = depth / ONE_PLY;
-            const int se = pos.evaluate();
-            evalStack_[ply] = se;
-            if (cfg.useImproving && ply >= 2) improving = se > evalStack_[ply - 2];
             if (!pvNode && !root && cfg.gateDepth > 0 && dPly <= cfg.gateDepth && std::abs(alpha) < MATE_BOUND)
                 gate = se + cfg.gateMargin * std::max(dPly, 1) / (improving ? 1 : 2) <= alpha;
         }
@@ -351,6 +373,13 @@ private:
         const int keepLimit = cfg.keepBase + cfg.keepPerPly * (depth / ONE_PLY) + (pvNode ? cfg.keepBase : 0) - (improving ? 0 : 1);
         const int prevMove = ply > 0 ? moveStack_[ply - 1] : NO_MOVE;
         const int counterMove = (cfg.useCounter && prevMove >= 0) ? counter_[ply & 1][prevMove] : NO_MOVE;
+        // 강한 수 개수 한도 (모든 수 기준)
+        int mcLimit = P::NUM_MOVES + 1;
+        if (cfg.mcpBase > 0) {
+            const double d = double(depth) / ONE_PLY;
+            mcLimit = int((cfg.mcpBase + std::pow(std::max(d, 0.0), cfg.mcpExp100 / 100.0)) / (improving ? 1 : 2));
+            mcLimit = std::max(mcLimit, 1);
+        }
 
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
@@ -381,6 +410,9 @@ private:
             for (int j = bi; j > i; --j) { moves[j] = moves[j - 1]; order[j] = order[j - 1]; }
             moves[i] = m; order[i] = mOrder;
 
+            // 강한 수 개수 가지치기: 이미 지지 않는 수를 찾았으면 한도 넘는 수는 보지 않는다
+            if (!root && i >= mcLimit && best > -MATE_BOUND && n > 1) break;
+
             // 이 수가 소모할 깊이 (기본 1수, 실현 확률 깊이면 정책 차이만큼 추가)
             int extra = 0, cost = ONE_PLY;
             if constexpr (scored) {
@@ -397,7 +429,8 @@ private:
                         int r = lmrTab_[std::min(depth / ONE_PLY, 63)][std::min(i, 63)];
                         if (pvNode) r = r * 2 / 3;
                         if (!improving) r += ONE_PLY / 2;
-                        extra = std::max(extra, std::min(r, depth - ONE_PLY));
+                        extra = cfg.lmrAdditive ? extra + r : std::max(extra, r);
+                        extra = std::min(extra, std::max(depth - ONE_PLY, 0));
                     }
                 }
             }
