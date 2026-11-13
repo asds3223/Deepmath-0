@@ -7,8 +7,13 @@
 //              형제 묶음은 "같은 부모에서 어느 자식이 더 나은가"를 NNUE 와 같게 판단하는지 재는 데 쓴다.
 //   label      기존 레코드(예: 우리 탐색 트리 리프 덤프)에 NNUE 가치/정책/탐색 라벨을 다시 붙인다.
 //   bench      NNUE 정적 평가·정책·탐색 처리량 측정 (데이터 예산 산정용)
+//   match      우리 고전평가 모델 vs Rapfi NNUE 단독(탐색 없음) 대국
+//              --ours greedy(1수 정적평가) | search(우리 alphabeta, --ms)
+//              --rapfi greedy(1수 NNUE 가치) | policy(NNUE 정책 1순위)
+//              즉승·상대 4 막기·즉패 회피 규칙은 양쪽에 동일 적용
 //
 // 병렬: 한 프로세스 = 한 코어. 대량 작업은 scripts/ 의 셸 스크립트가 코어 수만큼 프로세스를 띄운다.
+#include "../engine/eval.hpp"
 #include "../engine/record.hpp"
 
 #include "command/command.h"
@@ -339,7 +344,116 @@ int cmdBench(const std::map<std::string, std::string>& a) {
     return 0;
 }
 
+// ── match ──
+std::vector<int> replaySeq(const gmk::Record& src) {
+    uint8_t arr[gmk::NMOVES]; src.unpack(arr);
+    std::vector<int> bl, wh;
+    const int l1 = src.last1 == 255 ? -1 : src.last1, l2 = src.last2 == 255 ? -1 : src.last2;
+    for (int m = 0; m < gmk::NMOVES; ++m) {
+        if (m == l1 || m == l2) continue;
+        if (arr[m] == gmk::BLACK) bl.push_back(m); else if (arr[m] == gmk::WHITE) wh.push_back(m);
+    }
+    auto pushLast = [&](int m) { if (m >= 0) (arr[m] == gmk::BLACK ? bl : wh).push_back(m); };
+    pushLast(l2); pushLast(l1);
+    std::vector<int> seq;
+    if (!(bl.size() == wh.size() || bl.size() == wh.size() + 1)) return seq;
+    for (size_t k = 0; k < bl.size() + wh.size(); ++k) seq.push_back(k % 2 == 0 ? bl[k / 2] : wh[k / 2]);
+    return seq;
+}
+
+// 자식 국면 판정 공통: 내가 5목 → 승, 상대 즉승/쌍사 → 패
+// 반환: +1 확정 승, -1 확정 패, 0 미확정
+int childVerdict(const gmk::Board& child) {
+    if (child.isLoss()) return 1;
+    int ls;
+    if (child.leafProbe(0, ls)) return ls > 0 ? -1 : 1;
+    return 0;
+}
+
+int pickOursGreedy(gmk::Board& b) {
+    int mv[gmk::NMOVES], n = b.generate(mv);
+    if (n == 1) return mv[0];
+    int best = mv[0]; double bs = -1e18;
+    for (int i = 0; i < n; ++i) {
+        b.make(mv[i]);
+        const int v = childVerdict(b);
+        const double sc = v ? v * 1e9 : -double(b.evaluate());
+        b.undo(mv[i]);
+        if (sc > bs) { bs = sc; best = mv[i]; }
+    }
+    return best;
+}
+
+int pickRapfi(Pair& p, bool policy) {
+    const gmk::Model* keep = p.gb.model; p.gb.model = nullptr;
+    int mv[gmk::NMOVES], n = p.gb.generate(mv);
+    p.gb.model = keep;
+    if (n == 1) return mv[0];
+    if (policy) {
+        NNOut nn = nnEval(p);
+        for (auto& pr : nn.pol) for (int i = 0; i < n; ++i) if (mv[i] == pr.second) return pr.second;
+        return mv[0];
+    }
+    int best = mv[0]; double bs = -1e18;
+    for (int i = 0; i < n; ++i) {
+        p.move(mv[i]);
+        const int v = childVerdict(p.gb);
+        double sc;
+        if (v) sc = v * 1e9;
+        else { auto val = p.rb->evaluator()->evaluateValue(*p.rb); sc = 1.0 - (val.win() + 0.5 * val.draw()); }
+        p.undo();
+        if (sc > bs) { bs = sc; best = mv[i]; }
+    }
+    return best;
+}
+
+int cmdMatch(const std::map<std::string, std::string>& a) {
+    gmk::Model mdl;
+    if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
+    const bool oursSearch = get<std::string>(a, "ours", "greedy") == "search";
+    const bool rapfiPolicy = get<std::string>(a, "rapfi", "greedy") == "policy";
+    const int64_t ms = get<int64_t>(a, "ms", 100);
+    const int pairs = get(a, "pairs", 20), offset = get(a, "offset", 0), stride = get(a, "stride", 1);
+    std::vector<gmk::Record> recs, opens;
+    gmk::readRecords(get<std::string>(a, "data", ""), recs);
+    for (auto& r : recs)
+        if (!(r.flags & (gmk::REC_SIBLING | gmk::REC_LEAF | gmk::REC_SELF_FIVE | gmk::REC_OPPO_FIVE)) && r.ply >= 4 &&
+            r.ply <= 10 && std::fabs(r.nnWinrate() - 0.5f) < 0.2f) opens.push_back(r);
+    ab::Searcher<gmk::Board> srch(64);
+    int win = 0, draw = 0, loss = 0; long moves = 0;
+    for (int pi = 0; pi < pairs; ++pi) {
+        const gmk::Record& o = opens[(size_t(offset) + size_t(pi) * stride * 7919) % opens.size()];
+        const std::vector<int> seq = replaySeq(o);
+        if (seq.empty()) continue;
+        for (int g = 0; g < 2; ++g) {
+            Pair p; p.reset();
+            gmk::Board ob; ob.model = &mdl;
+            for (int m : seq) { p.move(m); ob.make(m); }
+            const int oursColor = g == 0 ? ob.side : gmk::opp(ob.side);
+            srch.tt.clear(); srch.clearHeuristics();
+            int result = 0;
+            while (true) {
+                const bool oursTurn = ob.side == oursColor;
+                int m;
+                if (oursTurn) {
+                    if (oursSearch) m = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, ms, 0}).bestMove;
+                    else m = pickOursGreedy(ob);
+                } else m = pickRapfi(p, rapfiPolicy);
+                if (m < 0 || !ob.isEmptyMove(m)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { m = q; break; } }
+                p.move(m); ob.make(m); ++moves;
+                if (ob.isLoss()) { result = oursTurn ? 1 : -1; break; }
+                if (ob.isDraw()) break;
+            }
+            (result > 0 ? win : result < 0 ? loss : draw)++;
+        }
+    }
+    std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f\n", win, draw, loss, win + draw + loss,
+                double(moves) / std::max(1, win + draw + loss));
+    return 0;
+}
+
 } // namespace
+
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -353,6 +467,7 @@ int main(int argc, char** argv) {
     if (mode == "gen") return cmdGen(a);
     if (mode == "label") return cmdLabel(a);
     if (mode == "bench") return cmdBench(a);
+    if (mode == "match") return cmdMatch(a);
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;
 }
