@@ -147,7 +147,7 @@ struct Config {
     bool useQuiesce    = true;
     int  qMaxPly       = 6;
     int  softTimePct   = 50;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음
-    bool useVCF        = true;  // vcfProbe 가 있으면 정지 탐색에서 기준값 전에 연속 4 강제승 판정
+    bool useVCF        = false; // (기본 끔: 같은 시간 대국에서 이득 없음, 비용 ~40%) vcfProbe 가 있으면 정지 탐색에서 기준값 전에 연속 4 강제승 판정
     int  qThreePly     = 0;     // 정지 탐색 앞쪽 몇 수까지 열린 3 공격을 포함할지
 };
 
@@ -155,6 +155,7 @@ struct Result {
     int      bestMove = NO_MOVE;
     int      score    = 0;
     int      depth    = 0;      // 완료된 마지막 반복 깊이
+    int      selDepth = 0;      // 실제로 도달한 최대 수 깊이 (정지 탐색 포함)
     uint64_t nodes    = 0;
     int64_t  timeMs   = 0;
     std::vector<int> pv;
@@ -177,7 +178,7 @@ public:
     }
 
     Result think(P& pos, const Limits& lim) {
-        lim_ = lim; nodes_ = 0; stopped_ = false;
+        lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0;
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
         tt.newSearch();
@@ -215,7 +216,7 @@ public:
             prev = s;
             res.score = s; res.depth = d;
             res.pv.assign(pv_[0], pv_[0] + pvLen_[0]);
-            res.nodes = nodes_; res.timeMs = elapsedMs();
+            res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = selDepth_;
             if (onIteration) onIteration(res);
 
             // 강제승/패가 확정되고 그 수순 길이만큼 읽었으면 종료
@@ -223,7 +224,7 @@ public:
             // 소프트 리밋: 다음 반복을 끝낼 가망이 없으면 시작하지 않음
             if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
         }
-        res.nodes = nodes_; res.timeMs = elapsedMs();
+        res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = std::max(res.selDepth, selDepth_);
         return res;
     }
 
@@ -250,6 +251,7 @@ private:
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
         ++nodes_;
+        if (ply > selDepth_) selDepth_ = ply;
 
         const bool root   = (ply == 0);
         const bool pvNode = (beta - alpha > 1);
@@ -393,6 +395,7 @@ private:
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
         ++nodes_;
+        if (ply > selDepth_) selDepth_ = ply;
         if (pos.isLoss()) return -MATE + ply;
         if (pos.isDraw()) return 0;
         if constexpr (detail::HasLeafProbe<P>::value) {
@@ -439,6 +442,7 @@ private:
 
     Limits            lim_;
     uint64_t          nodes_   = 0;
+    int               selDepth_ = 0;
     bool              stopped_ = false;
     std::atomic<bool> stopFlag_{false};
     Clock::time_point start_;

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,19 @@ public:
         std::fwrite(wv.data(), sizeof(float), wv.size(), f);
         std::fwrite(wp.data(), sizeof(float), wp.size(), f);
         std::fclose(f);
+        return true;
+    }
+    // 메모리에 담긴 모델(실행 파일 내장용) 로드 — 파일 형식과 같다
+    bool loadMem(const uint8_t* d, size_t n) {
+        const auto& L = feat::Layout::get();
+        const size_t need = 12 + 4 + 4 * (wv.size() + wp.size());
+        if (n < need) return false;
+        uint32_t h[3]; std::memcpy(h, d, 12);
+        if (h[0] != MAGIC || h[1] != uint32_t(L.NV) || h[2] != uint32_t(L.NP)) return false;
+        std::memcpy(&scale, d + 12, 4);
+        std::memcpy(wv.data(), d + 16, 4 * wv.size());
+        std::memcpy(wp.data(), d + 16 + 4 * wv.size(), 4 * wp.size());
+        quantize();
         return true;
     }
     bool load(const std::string& path) {
