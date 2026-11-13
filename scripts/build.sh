@@ -13,5 +13,6 @@ $CXX $FLAGS engine/test_board.cpp     -o build/test_board
 $CXX $FLAGS engine/test_incremental.cpp -o build/test_incremental
 $CXX $FLAGS tools/train.cpp           -o build/train
 $CXX $FLAGS tools/evaltool.cpp        -o build/evaltool
+$CXX $FLAGS tools/match.cpp           -o build/match
 $CXX $FLAGS engine/pbrain.cpp         -o build/pbrain-dce
 echo "built: build/{oracle/oracle,train,evaltool,pbrain-dce,test_ab,test_board}"
