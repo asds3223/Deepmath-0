@@ -103,7 +103,8 @@ inline uint16_t relKey(const Board& b, int d, int c) {
     return b.side == BLACK ? k : LineTables::get().swapKey[k];
 }
 
-template <class F>
+// Compact=true: Yixin 식 압축형 — 라인 모양 원형 표(LS) 없이 해석 가능한 위협/등급/조합 표만 사용
+template <bool Compact = false, class F>
 inline void valueFeatures(const Board& b, F&& emit) {
     const auto& L = Layout::get();
     const auto& C = LineCanon::get();
@@ -118,7 +119,7 @@ inline void valueFeatures(const Board& b, F&& emit) {
             const bool hs = keyHasStone(b.lkey[d][c]);
             near |= hs;
             if (cs == 0 && !hs) continue;
-            emit(L.LS + cs * L.NC + C.id[relKey(b, d, c)]);
+            if constexpr (!Compact) emit(L.LS + cs * L.NC + C.id[relKey(b, d, c)]);
         }
         if (cs == 0) {
             if (!near) continue;
@@ -145,13 +146,14 @@ inline int threatClass(const Board& b) {
     return classTier(b.bestClass(b.side)) * 5 + classTier(b.bestClass(opp(b.side)));
 }
 
-template <class F>
+template <bool Compact = false, class F>
 inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
     const auto& L = Layout::get();
     const auto& C = LineCanon::get();
     const int s = b.side - 1, o = 2 - b.side;
-    for (int d = 0; d < 4; ++d)
-        if (keyHasStone(b.lkey[d][c])) emit(L.PLS + C.id[relKey(b, d, c)]);
+    if constexpr (!Compact)
+        for (int d = 0; d < 4; ++d)
+            if (keyHasStone(b.lkey[d][c])) emit(L.PLS + C.id[relKey(b, d, c)]);
     emit(L.PCS + b.code[s][c]);
     emit(L.PCO + b.code[o][c]);
     emit(L.PJ + (tclass * CLASS_NB + b.cls[s][c]) * CLASS_NB + b.cls[o][c]);

@@ -63,7 +63,7 @@ void accumulate(const Model& mdl, const Record* recs, const uint32_t* idx, size_
             const float gr = q - p;
             const float t = feat::taper(b);
             const float g0 = gr * (1 - t), g1 = gr * t;
-            feat::valueFeatures(b, [&](int i) { g.gv[2 * i] += g0; g.gv[2 * i + 1] += g1; });
+            mdl.forValue(b, [&](int i) { g.gv[2 * i] += g0; g.gv[2 * i + 1] += g1; });
             g.vloss += -(p * std::log(std::max(q, 1e-7f)) + (1 - p) * std::log(std::max(1 - q, 1e-7f)));
             ++g.vn;
         }
@@ -78,7 +78,7 @@ void accumulate(const Model& mdl, const Record* recs, const uint32_t* idx, size_
                     const float pr = float(std::exp(sc[i] - mx) / z);
                     const float gr = pr - tgt[i];
                     if (tgt[i] > 0) g.ploss += -tgt[i] * std::log(std::max(pr, 1e-9f));
-                    if (gr != 0) feat::policyFeatures(b, toCell(moves[i]), tc, [&](int f) { g.gp[f] += gr; });
+                    if (gr != 0) mdl.forPolicy(b, toCell(moves[i]), tc, [&](int f) { g.gp[f] += gr; });
                 }
                 ++g.pn;
             }
@@ -133,7 +133,14 @@ int main(int argc, char** argv) {
 
     Model mdl;
     mdl.scale = float(argf(a, "scale", 200));
+    mdl.compact = argf(a, "compact", 0) != 0;
     if (a.count("init") && !mdl.load(a["init"])) { std::fprintf(stderr, "cannot load init model\n"); return 1; }
+    {
+        size_t nzv = 0; const auto& L2 = feat::Layout::get();
+        std::printf("feature set: %s (active value params ≈ %d x2, policy ≈ %d)\n", mdl.compact ? "compact(Yixin-style)" : "full",
+                    mdl.compact ? L2.NV - 3 * L2.NC : L2.NV, mdl.compact ? L2.NP - L2.NC : L2.NP);
+        (void)nzv;
+    }
     Adam av, ap; av.init(mdl.wv.size()); ap.init(mdl.wp.size());
     std::vector<Grad> grads(threads);
     std::vector<uint32_t> order(recs.size());

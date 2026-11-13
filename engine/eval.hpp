@@ -10,25 +10,33 @@ namespace gmk {
 
 class Model {
 public:
-    static constexpr uint32_t MAGIC = 0x44434532;   // "DCE2"
+    static constexpr uint32_t MAGIC = 0x44434533;   // "DCE3"
     std::vector<float> wv;      // 가치: [2*i] 초반, [2*i+1] 후반
     std::vector<float> wp;      // 정책
     float scale    = 200.f;     // 탐색 정수 점수 = 로짓 × scale
     int   maxCands = 0;         // >0 이면 정책 상위 N 개로 후보 제한 (기본 OFF)
+    bool  compact  = false;     // Yixin 식 압축형 (라인 모양 원형 표 미사용)
+
+    template <class F> void forValue(const Board& b, F&& f) const {
+        if (compact) feat::valueFeatures<true>(b, f); else feat::valueFeatures<false>(b, f);
+    }
+    template <class F> void forPolicy(const Board& b, int c, int tc, F&& f) const {
+        if (compact) feat::policyFeatures<true>(b, c, tc, f); else feat::policyFeatures<false>(b, c, tc, f);
+    }
 
     Model() { const auto& L = feat::Layout::get(); wv.assign(2 * size_t(L.NV), 0.f); wp.assign(L.NP, 0.f); }
 
     float valueLogit(const Board& b) const {
         float s0 = 0, s1 = 0;
         const float* w = wv.data();
-        feat::valueFeatures(b, [&](int i) { s0 += w[2 * i]; s1 += w[2 * i + 1]; });
+        forValue(b, [&](int i) { s0 += w[2 * i]; s1 += w[2 * i + 1]; });
         const float t = feat::taper(b);
         return s0 * (1 - t) + s1 * t;
     }
     float policyScore(const Board& b, int c, int tclass) const {
         float s = 0;
         const float* w = wp.data();
-        feat::policyFeatures(b, c, tclass, [&](int i) { s += w[i]; });
+        forPolicy(b, c, tclass, [&](int i) { s += w[i]; });
         return s;
     }
 
@@ -36,7 +44,7 @@ public:
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) return false;
         const auto& L = feat::Layout::get();
-        uint32_t h[4] = {MAGIC, uint32_t(L.NV), uint32_t(L.NP), uint32_t(L.NC)};
+        uint32_t h[5] = {MAGIC, uint32_t(L.NV), uint32_t(L.NP), uint32_t(L.NC), uint32_t(compact)};
         std::fwrite(h, sizeof h, 1, f);
         std::fwrite(&scale, sizeof scale, 1, f);
         std::fwrite(wv.data(), sizeof(float), wv.size(), f);
@@ -48,13 +56,15 @@ public:
         FILE* f = std::fopen(path.c_str(), "rb");
         if (!f) return false;
         const auto& L = feat::Layout::get();
-        uint32_t h[4];
-        bool ok = std::fread(h, sizeof h, 1, f) == 1 && h[0] == MAGIC && h[1] == uint32_t(L.NV) &&
-                  h[2] == uint32_t(L.NP) && h[3] == uint32_t(L.NC) &&
-                  std::fread(&scale, sizeof scale, 1, f) == 1 &&
-                  std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
-                  std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
+        uint32_t h[5] = {0, 0, 0, 0, 0};
+        bool ok = std::fread(h, sizeof(uint32_t), 4, f) == 4 && (h[0] == MAGIC || h[0] == 0x44434532u) &&
+                  h[1] == uint32_t(L.NV) && h[2] == uint32_t(L.NP) && h[3] == uint32_t(L.NC);
+        if (ok && h[0] == MAGIC) ok = std::fread(&h[4], sizeof(uint32_t), 1, f) == 1;   // DCE2 는 compact 필드 없음
+        ok = ok && std::fread(&scale, sizeof scale, 1, f) == 1 &&
+             std::fread(wv.data(), sizeof(float), wv.size(), f) == wv.size() &&
+             std::fread(wp.data(), sizeof(float), wp.size(), f) == wp.size();
         std::fclose(f);
+        compact = ok && h[4] != 0;
         return ok;
     }
 };

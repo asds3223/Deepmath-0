@@ -82,6 +82,33 @@ int main(int argc, char** argv) {
                     msSum > 0 ? nodeSum / (msSum / 1000) : 0);
         return 0;
     }
+    if (mode == "bench") {
+        // 평가 1회 시간 + 고정 노드 탐색 속도
+        Board b; b.model = &mdl;
+        std::vector<Record> pos;
+        for (auto& r : recs) if (!(r.flags & (REC_SELF_FIVE | REC_SIBLING | REC_LEAF)) && r.ply >= 8) pos.push_back(r);
+        if (pos.size() > 2000) pos.resize(2000);
+        long long acc = 0; int mv[NMOVES];
+        auto t0 = std::chrono::steady_clock::now(); long n = 0;
+        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); ++n; }
+        const double setupUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
+        t0 = std::chrono::steady_clock::now(); n = 0;
+        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); acc += b.evaluate(); ++n; }
+        const double evalUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n - setupUs;
+        t0 = std::chrono::steady_clock::now(); n = 0;
+        for (int rep = 0; rep < 20; ++rep) for (auto& r : pos) { r.toBoard(b); acc += b.generate(mv); ++n; }
+        const double genUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n - setupUs;
+        const uint64_t nodes = uint64_t(num(a, "nodes", 50000));
+        ab::Searcher<Board> s(64); double tn = 0, tms = 0, dep = 0; int k = 0;
+        for (size_t i = 0; i < pos.size() && k < int(num(a, "searches", 40)); i += 50, ++k) {
+            pos[i].toBoard(b); s.tt.clear(); s.clearHeuristics();
+            ab::Result r = s.think(b, ab::Limits{ab::MAX_PLY - 1, -1, nodes});
+            tn += double(r.nodes); tms += double(r.timeMs); dep += r.depth;
+        }
+        std::printf("[bench] %s evaluate=%.2fus generate(+policy sort)=%.2fus | search %llu nodes x%d: nps=%.0f avg-depth=%.2f (acc=%lld)\n",
+                    mdl.compact ? "compact" : "full", evalUs, genUs, (unsigned long long)nodes, k, tn / (tms / 1000), dep / k, acc);
+        return 0;
+    }
     if (mode == "leafdump") {
         const uint64_t nodes = uint64_t(num(a, "nodes", 20000));
         RecordWriter w(a.count("out") ? a["out"] : "leaves.bin");
