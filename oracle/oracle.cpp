@@ -483,6 +483,11 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     srch.cfg.gateMargin   = get(a, "gatemargin", srch.cfg.gateMargin);
     gmk::g_tacSelf        = get(a, "tacself", gmk::g_tacSelf);
     gmk::g_tacOppo        = get(a, "tacoppo", gmk::g_tacOppo);
+    srch.cfg.lmrDiv100    = get(a, "lmrdiv", srch.cfg.lmrDiv100);
+    srch.cfg.lmrBase100   = get(a, "lmrbase", srch.cfg.lmrBase100);
+    srch.cfg.useIIR       = get(a, "iir", 1) != 0;
+    srch.cfg.useImproving = get(a, "impr", 1) != 0;
+    srch.cfg.useCounter   = get(a, "cm", 1) != 0;
     const bool diag = get(a, "diag", 0) != 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
     gmk::g_vcfBudget      = get(a, "vcfbudget", gmk::g_vcfBudget);

@@ -20,8 +20,17 @@ int main(int argc, char** argv) {
     const int pairs = int(num("pairs", 20)), offset = int(num("offset", 0)), stride = int(num("stride", 1));
     const int64_t ms = int64_t(num("ms", 100));
     ab::Searcher<Board> sa(64), sb(64);
-    sa.cfg.useVCF = num("a-vcf", 0) != 0;      // 양쪽 탐색 설정을 따로 (VCF 켬/끔 비교용)
-    sb.cfg.useVCF = num("b-vcf", 0) != 0;
+    // 양쪽 탐색 설정을 따로: --a-키 값 / --b-키 값
+    auto apply = [&](ab::Config& c, const std::string& p) {
+        auto g = [&](const char* k, int d) { const std::string key = p + k; return a.count(key) ? std::stoi(a[key]) : d; };
+        c.useVCF = g("vcf", 0) != 0;
+        c.lmrDiv100 = g("lmrdiv", c.lmrDiv100); c.lmrBase100 = g("lmrbase", c.lmrBase100);
+        c.useIIR = g("iir", 1) != 0; c.useImproving = g("impr", 1) != 0; c.useCounter = g("cm", 1) != 0;
+        c.qMaxPly = g("qmax", c.qMaxPly); c.cutGap = g("cutgap", c.cutGap); c.cutMinKeep = g("cutkeep", c.cutMinKeep);
+        c.rpsPerLogit = g("rpsk", c.rpsPerLogit); c.keepBase = g("keepbase", c.keepBase); c.keepPerPly = g("keepply", c.keepPerPly);
+        c.gateDepth = g("gate", c.gateDepth); c.gateMargin = g("gatemargin", c.gateMargin);
+    };
+    apply(sa.cfg, "a-"); apply(sb.cfg, "b-");
     g_vcfBudget = int(num("vcf-budget", g_vcfBudget));
     int win = 0, draw = 0, loss = 0; double na = 0, ta = 0, nb = 0, tb = 0; long movesTotal = 0;
     for (int p = 0; p < pairs; ++p) {

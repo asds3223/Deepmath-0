@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -149,9 +150,15 @@ struct Config {
     // ── 정적 문턱: 비PV, 남은 깊이 ≤ gateDepth 에서 정적평가 + gateMargin·d ≤ alpha 면 첫 수 뒤 비전술 수 생략 ──
     int  gateDepth     = 2;     // 0 이면 끔
     int  gateMargin    = 150;
+    // ── 로그형 늦은 수 감축: r = lmrBase + ln(d)·ln(i)/lmrDiv (×ONE_PLY, 0 이면 끔) ──
+    int  lmrBase100    = 50;    // ×0.01 수
+    int  lmrDiv100     = 250;   // ×0.01
+    bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
+    bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
+    bool useCounter    = true;  // 상대 직전 수에 대한 반박수 기억
     // ── mustDefend/forcingMoves 가 있을 때 ──
     bool useQuiesce    = true;
-    int  qMaxPly       = 6;
+    int  qMaxPly       = 4;     // A/B 1000판: 4 가 6 보다 +24 Elo (12ms)
     int  softTimePct   = 50;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음
     bool useVCF        = false; // (기본 끔: 같은 시간 대국에서 이득 없음, 비용 ~40%) vcfProbe 가 있으면 정지 탐색에서 기준값 전에 연속 4 강제승 판정
     int  qThreePly     = 0;     // 정지 탐색 앞쪽 몇 수까지 열린 3 공격을 포함할지
@@ -164,6 +171,8 @@ struct Result {
     int      selDepth = 0;      // 실제로 도달한 최대 수 깊이 (정지 탐색 포함)
     uint64_t interior = 0;      // 수를 생성한 내부 노드 수
     uint64_t searched = 0;      // 내부 노드에서 실제로 탐색한 자식 수 (searched/interior = 실효 분기)
+    uint64_t cutFirst = 0, cutTotal = 0;   // 베타 컷 중 첫 수에서 난 비율 = 정렬 품질
+    uint64_t qnodes = 0;                   // 정지 탐색 노드 수
     uint64_t nodes    = 0;
     int64_t  timeMs   = 0;
     std::vector<int> pv;
@@ -178,18 +187,25 @@ public:
     std::function<void(const Result&)> onIteration;   // 반복 완료마다 호출 (선택)
 
     explicit Searcher(size_t ttMb = 64) : tt(ttMb) { clearHeuristics(); }
+    void buildLmr() {
+        for (int d = 0; d < 64; ++d) for (int i = 0; i < 64; ++i)
+            lmrTab_[d][i] = (d < 1 || i < 1 || cfg.lmrDiv100 <= 0) ? 0
+                : std::max(0, int(ONE_PLY * (cfg.lmrBase100 / 100.0 + std::log(double(d)) * std::log(double(i)) * 100.0 / cfg.lmrDiv100)));
+    }
 
     void stop() { stopFlag_.store(true, std::memory_order_relaxed); }  // 외부 중단
     void clearHeuristics() {
         std::memset(history_, 0, sizeof(history_));
+        for (auto& sd : counter_) for (int& x : sd) x = NO_MOVE;
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
     }
 
     Result think(P& pos, const Limits& lim) {
-        lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0; interior_ = 0; searched_ = 0;
+        lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0; interior_ = 0; searched_ = 0; cutFirst_ = cutTotal_ = 0; qnodes_ = 0;
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
         tt.newSearch();
+        buildLmr();
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
         for (auto& side : history_) for (int& h : side) h /= 2;   // 히스토리 에이징
 
@@ -225,7 +241,7 @@ public:
             res.score = s; res.depth = d;
             res.pv.assign(pv_[0], pv_[0] + pvLen_[0]);
             res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = selDepth_;
-            res.interior = interior_; res.searched = searched_;
+            res.interior = interior_; res.searched = searched_; res.cutFirst = cutFirst_; res.cutTotal = cutTotal_; res.qnodes = qnodes_;
             if (onIteration) onIteration(res);
 
             // 강제승/패가 확정되고 그 수순 길이만큼 읽었으면 종료
@@ -234,7 +250,7 @@ public:
             if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
         }
         res.nodes = nodes_; res.timeMs = elapsedMs(); res.selDepth = std::max(res.selDepth, selDepth_);
-        res.interior = interior_; res.searched = searched_;
+        res.interior = interior_; res.searched = searched_; res.cutFirst = cutFirst_; res.cutTotal = cutTotal_; res.qnodes = qnodes_;
         return res;
     }
 
@@ -301,6 +317,10 @@ private:
             }
         }
 
+        // 내부 반복 감축: 깊은 노드에서 TT 수가 없으면 정렬 정보가 부족 → 한 수 얕게 (싸게 TT 수 확보)
+        if constexpr (detail::HasScored<P>::value)
+            if (cfg.useIIR && cfg.useTT && !root && ttMove == NO_MOVE && depth >= 4 * ONE_PLY) depth -= ONE_PLY;
+
         // ── 수 생성 및 정렬 점수 ──
         int moves[P::NUM_MOVES];
         int order[P::NUM_MOVES];
@@ -318,14 +338,19 @@ private:
         ++interior_;
 
         // 정적 문턱 (비PV, 얕은 깊이): 정적평가로도 alpha 에 못 미치면 조용한 수는 첫 수 뒤 생략
-        bool gate = false;
+        bool gate = false, improving = true;
         if constexpr (scored) {
             const int dPly = depth / ONE_PLY;
+            const int se = pos.evaluate();
+            evalStack_[ply] = se;
+            if (cfg.useImproving && ply >= 2) improving = se > evalStack_[ply - 2];
             if (!pvNode && !root && cfg.gateDepth > 0 && dPly <= cfg.gateDepth && std::abs(alpha) < MATE_BOUND)
-                gate = pos.evaluate() + cfg.gateMargin * std::max(dPly, 1) <= alpha;
+                gate = se + cfg.gateMargin * std::max(dPly, 1) / (improving ? 1 : 2) <= alpha;
         }
         int quietSearched = 0;
-        const int keepLimit = cfg.keepBase + cfg.keepPerPly * (depth / ONE_PLY) + (pvNode ? cfg.keepBase : 0);
+        const int keepLimit = cfg.keepBase + cfg.keepPerPly * (depth / ONE_PLY) + (pvNode ? cfg.keepBase : 0) - (improving ? 0 : 1);
+        const int prevMove = ply > 0 ? moveStack_[ply - 1] : NO_MOVE;
+        const int counterMove = (cfg.useCounter && prevMove >= 0) ? counter_[ply & 1][prevMove] : NO_MOVE;
 
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
@@ -335,6 +360,7 @@ private:
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
+                     : m == counterMove       ? (1 << 29) - 2
                      : std::min(base, (1 << 28));
         }
 
@@ -366,11 +392,19 @@ private:
                     if (!root && cfg.keepBase > 0 && quietSearched >= keepLimit) continue;  // 깊이별 예산
                     ++quietSearched;
                     if (cfg.useRPS) extra = std::min(cfg.rpsMaxExtra, (smax - mScore) * cfg.rpsPerLogit / 256);
+                    // 로그형 늦은 수 감축 (깊이 3 이상, 앞 2수 제외): PV 는 덜, 개선 없으면 더
+                    if (i >= 2 && depth >= 3 * ONE_PLY) {
+                        int r = lmrTab_[std::min(depth / ONE_PLY, 63)][std::min(i, 63)];
+                        if (pvNode) r = r * 2 / 3;
+                        if (!improving) r += ONE_PLY / 2;
+                        extra = std::max(extra, std::min(r, depth - ONE_PLY));
+                    }
                 }
             }
 
             pos.make(m);
             ++searched_;
+            moveStack_[ply] = m;
             int s;
             if (i == 0) {
                 s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
@@ -398,6 +432,8 @@ private:
                     pvLen_[ply] = pvLen_[ply + 1] + 1;
                     if (root) rootBest_ = m;
                     if (s >= beta) {                     // 베타 컷
+                        ++cutTotal_; cutFirst_ += (i == 0);
+                        if (cfg.useCounter && prevMove >= 0) counter_[ply & 1][prevMove] = m;
                         if (killers_[ply][0] != m) { killers_[ply][1] = killers_[ply][0]; killers_[ply][0] = m; }
                         int& h = history_[side][m];
                         h += (depth * depth) / (ONE_PLY * ONE_PLY) + 1;
@@ -419,7 +455,7 @@ private:
     int qsearch(P& pos, int alpha, int beta, int ply, int qply) {
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
-        ++nodes_;
+        ++nodes_; ++qnodes_;
         if (ply > selDepth_) selDepth_ = ply;
         if (pos.isLoss()) return -MATE + ply;
         if (pos.isDraw()) return 0;
@@ -468,7 +504,11 @@ private:
     Limits            lim_;
     uint64_t          nodes_   = 0;
     int               selDepth_ = 0;
-    uint64_t          interior_ = 0, searched_ = 0;
+    uint64_t          interior_ = 0, searched_ = 0, cutFirst_ = 0, cutTotal_ = 0, qnodes_ = 0;
+    int               moveStack_[MAX_PLY + 2];          // ply 에서 둔 수
+    int               evalStack_[MAX_PLY + 2];          // ply 의 정적평가 (improving 판정)
+    int               counter_[2][P::NUM_MOVES];        // [둘 차례][상대 직전 수] → 반박수
+    int               lmrTab_[64][64];
     bool              stopped_ = false;
     std::atomic<bool> stopFlag_{false};
     Clock::time_point start_;
