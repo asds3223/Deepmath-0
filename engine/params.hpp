@@ -22,6 +22,7 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"orderPolicyW", &Config::orderPolicyW},      {"useCounter", nullptr, &Config::useCounter},
         {"rpsPerLogit", &Config::rpsPerLogit},        {"rpsMaxExtra", &Config::rpsMaxExtra},
         {"lmrDiv100", &Config::lmrDiv100},            {"forcedCost", &Config::forcedCost},
+        {"tacCost", &Config::tacCost},
         {"useIIR", nullptr, &Config::useIIR},         {"useImproving", nullptr, &Config::useImproving},
         {"usePolicyCut", nullptr, &Config::usePolicyCut},
         {"cutGap", &Config::cutGap},                  {"cutMinKeep", &Config::cutMinKeep},
