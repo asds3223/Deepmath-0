@@ -300,11 +300,17 @@ inline int Board::defenseMoves(int* out) const {
         }
         return true;
     };
+    // 시험 대상: 급소를 지나는 줄(±4) 위의 칸 — 그 밖의 칸은 어떤 급소도 없앨 수 없다
+    bool mark[CELLS] = {};
+    for (int i = 0; i < nt; ++i) {
+        mark[thr[i]] = true;
+        for (int d = 0; d < 4; ++d) for (int k = -4; k <= 4; ++k) mark[thr[i] + k * DIRS[d]] = true;
+    }
     int n = 0;
     for (int m = 0; m < NMOVES; ++m) {
         const int c = cells[m];
         if (cell[c] != EMPTY) continue;
-        if (cls[s][c] >= C_FOUR || neutralizes(c)) out[n++] = m;
+        if (cls[s][c] >= C_FOUR || (mark[c] && neutralizes(c))) out[n++] = m;
     }
     return n;
 }

@@ -536,6 +536,7 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
 
 // ── depthcmp: 같은 국면·같은 노드 수에서 Rapfi 와 우리 엔진의 깊이 비교 ──
 int cmdDepthCmp(const std::map<std::string, std::string>& a) {
+    if (get(a, "rapfi-classical", 0) != 0) Search::Threads.setupEvaluator(nullptr);
     gmk::Model mdl;
     if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
     static const std::vector<std::vector<int>> pos = {
@@ -545,6 +546,7 @@ int cmdDepthCmp(const std::map<std::string, std::string>& a) {
     };
     std::vector<uint64_t> budgets = {10000, 100000, 1000000};
     ab::Searcher<gmk::Board> srch(128);
+    ab::applyParams(srch.cfg, a);
     std::printf("%-4s %-9s | %-28s | %-28s\n", "pos", "nodes", "Rapfi depth/sel  best  ms", "DCE depth/sel  best  ms");
     for (uint64_t nb : budgets) {
         for (size_t i = 0; i < pos.size(); ++i) {

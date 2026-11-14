@@ -170,6 +170,7 @@ struct Config {
     int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
     int  contW         = 0;     // 연속 히스토리(상대 직전 수 → 이 수) 정렬 가중 (0 = 끔)
     bool histMalus     = false; // 컷을 못 낸 조용한 수에 히스토리 감점
+    int  cutNodeRed    = 0;     // 컷 예상 노드(PVS 널 윈도우 자식)의 늦은 수 추가 감축 (ONE_PLY 단위의 1/4, 0 = 끔)
     int  qThreatPen    = 0;     // 정지 탐색: 상대 열린 3 류 위협이 있는데 기준값을 쓰면 이만큼 깎는다 (0 = 끔)
     int  razorDepth    = 2;     // 레이저링 (A/B 2,000판: d2 ≈ +15 Elo): 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
     int  razorMargin   = 200;
@@ -298,7 +299,7 @@ private:
     }
 
     // negamax PVS, fail-soft. 반환값은 둘 차례 기준.
-    int search(P& pos, int alpha, int beta, int depth, int ply) {
+    int search(P& pos, int alpha, int beta, int depth, int ply, bool cutNode = false) {
         constexpr bool scored = detail::HasScored<P>::value;
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
@@ -411,10 +412,12 @@ private:
         const int alpha0 = alpha;
         int best = -INF, bestMove = NO_MOVE;
 
+        bool restSorted = false;
         for (int i = 0; i < n; ++i) {
-            // 지연 선택 정렬 (동점이면 생성 순서 유지)
+            // 앞 2수는 지연 선택, 그 뒤는 남은 수를 한 번에 안정 정렬 (어느 쪽이든 "점수 내림차순, 동점이면 생성 순서")
+            if (!restSorted && i == 2 && n - i > 4) { sortRest(moves, order, pscore, tac, i, n); restSorted = true; }
             int bi = i;
-            for (int j = i + 1; j < n; ++j) if (order[j] > order[bi]) bi = j;
+            if (!restSorted) for (int j = i + 1; j < n; ++j) if (order[j] > order[bi]) bi = j;
             const int m = moves[bi], mOrder = order[bi];
             int mScore = 0; uint8_t mTac = 0;
             if constexpr (scored) {
@@ -442,6 +445,7 @@ private:
                         int r = lmrTab_[std::min(depth / ONE_PLY, 63)][std::min(i, 63)];
                         if (pvNode) r = r * 2 / 3;
                         if (!improving) r += ONE_PLY / 2;
+                        if (cutNode) r += cfg.cutNodeRed;
                         extra = std::min(extra + r, std::max(depth - ONE_PLY, 0));
                     }
                 }
@@ -452,15 +456,16 @@ private:
             moveStack_[ply] = m;
             if (mOrder < (1 << 29) - 2) quietTried[nQuietTried++] = m;
             int s;
+            const bool childCut0 = !pvNode && !cutNode;        // 첫 자식: PV 면 PV, 아니면 노드 종류가 뒤집힌다
             if (i == 0) {
-                s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
-                if (extra && s > alpha) s = -search(pos, -beta, -alpha, depth - cost, ply + 1);
+                s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1, childCut0);
+                if (extra && s > alpha) s = -search(pos, -beta, -alpha, depth - cost, ply + 1, childCut0);
             } else {
-                s = -search(pos, -alpha - 1, -alpha, depth - cost - extra, ply + 1);  // 널 윈도우
+                s = -search(pos, -alpha - 1, -alpha, depth - cost - extra, ply + 1, true);  // 널 윈도우 = 컷 예상
                 if (extra && s > alpha)
-                    s = -search(pos, -alpha - 1, -alpha, depth - cost, ply + 1);      // 감축 없이 재탐색
+                    s = -search(pos, -alpha - 1, -alpha, depth - cost, ply + 1, !cutNode);  // 감축 없이 재탐색
                 if (s > alpha && s < beta)
-                    s = -search(pos, -beta, -alpha, depth - cost, ply + 1);           // 풀 윈도우 재탐색
+                    s = -search(pos, -beta, -alpha, depth - cost, ply + 1, false);          // 풀 윈도우 재탐색
             }
             pos.undo(m);
             if (stopped_) return 0;
@@ -500,6 +505,16 @@ private:
             tt.store(key, scoreToTT(best, ply), bestMove, std::min(depth, 127), b);
         }
         return best;
+    }
+
+    // [i, n) 구간을 order 내림차순으로 안정 정렬 (네 배열을 함께)
+    static void sortRest(int* moves, int* order, int* pscore, uint8_t* tac, int i, int n) {
+        int idx[P::NUM_MOVES], m2[P::NUM_MOVES], o2[P::NUM_MOVES], p2[P::NUM_MOVES]; uint8_t t2[P::NUM_MOVES];
+        const int k = n - i;
+        for (int j = 0; j < k; ++j) idx[j] = i + j;
+        std::stable_sort(idx, idx + k, [&](int a, int b) { return order[a] > order[b]; });
+        for (int j = 0; j < k; ++j) { m2[j] = moves[idx[j]]; o2[j] = order[idx[j]]; p2[j] = pscore[idx[j]]; t2[j] = tac[idx[j]]; }
+        for (int j = 0; j < k; ++j) { moves[i + j] = m2[j]; order[i + j] = o2[j]; pscore[i + j] = p2[j]; tac[i + j] = t2[j]; }
     }
 
     // 정지 탐색: 위협 없음 → 기준값 + 4 만들기만, 상대 4 → 막기만

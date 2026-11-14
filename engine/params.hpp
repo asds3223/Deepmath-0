@@ -33,7 +33,7 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"histMalus", nullptr, &Config::histMalus},   {"razorDepth", &Config::razorDepth},
         {"razorMargin", &Config::razorMargin},        {"mcpBase", &Config::mcpBase},
         {"tacW", &Config::tacW},                      {"histDiv", &Config::histDiv},
-        {"qThreatPen", &Config::qThreatPen},
+        {"qThreatPen", &Config::qThreatPen},          {"cutNodeRed", &Config::cutNodeRed},
     };
     return d;
 }

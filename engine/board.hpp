@@ -113,9 +113,11 @@ public:
 
     // ── alphabeta 인터페이스 ──
     uint64_t key() const { return hash ^ (side == WHITE ? Zobrist::get().side : 0); }
+    // make: 바뀔 칸들의 상태를 저장한 뒤 증분 갱신.  undo: 저장해 둔 상태로 되돌린다 (재계산 없음).
     void make(int m) {
         const int c = toCell(m);
         fiveMade[ply] = cls[side - 1][c] == C_FIVE;
+        saveUndo(ply, c);
         hist[ply++] = m;
         put(c, side);
         side = opp(side);
@@ -123,7 +125,7 @@ public:
     void undo(int /*m*/) {
         const int m = hist[--ply];
         side = opp(side);
-        remove(toCell(m));
+        restoreUndo(ply, toCell(m));
     }
     bool isLoss() const { return ply > 0 && fiveMade[ply - 1]; }
     bool isDraw() const { return ply >= NMOVES; }
@@ -186,6 +188,60 @@ public:
     }
 
 private:
+    // ── 되돌리기 기록: 착수로 바뀌는 칸(자신 + 4방향 ±4 의 빈칸)의 이전 상태 ──
+    struct UndoRec {
+        int      na;
+        int16_t  cells[33];
+        uint8_t  lv[33][2][4];
+        uint16_t code[33][2];
+        uint8_t  cls[33][2];
+        int32_t  vcache[33][4];
+        int32_t  vacc[2][2];
+        int      clsCnt[2][CLASS_NB];
+        uint64_t candBits[4];
+    };
+    std::vector<UndoRec> undo_ = std::vector<UndoRec>(NMOVES + 1);
+
+    void saveUndo(int at, int c) {
+        UndoRec& u = undo_[at];
+        int aff[40];
+        u.na = affected(c, aff);
+        for (int i = 0; i < u.na; ++i) {
+            const int q = aff[i];
+            u.cells[i] = int16_t(q);
+            for (int s2 = 0; s2 < 2; ++s2) {
+                for (int d = 0; d < 4; ++d) u.lv[i][s2][d] = lv[s2][d][q];
+                u.code[i][s2] = code[s2][q]; u.cls[i][s2] = cls[s2][q];
+            }
+            std::memcpy(u.vcache[i], vcache[q], sizeof u.vcache[i]);
+        }
+        std::memcpy(u.vacc, vacc, sizeof vacc);
+        std::memcpy(u.clsCnt, clsCnt, sizeof clsCnt);
+        std::memcpy(u.candBits, candBits, sizeof candBits);
+    }
+    void restoreUndo(int at, int c) {
+        const UndoRec& u = undo_[at];
+        const int col = cell[c];
+        cell[c] = EMPTY;
+        hash ^= Zobrist::get().z[col][c];
+        for (int j = 0; j < 8; ++j) sh[c + SHAPE_DX[j] + SHAPE_DY[j] * W] &= uint16_t(~(3 << (2 * (7 - j))));
+        for (int d = 0; d < 4; ++d)
+            for (int k = -4; k <= 4; ++k)
+                if (k) lkey[d][c + k * DIRS[d]] &= uint16_t(~(3 << (2 * slotOf(-k))));
+        for (int o : nearOffsets()) { const int q = c + o; if (q >= 0 && q < CELLS) --nearCnt[q]; }
+        for (int i = 0; i < u.na; ++i) {
+            const int q = u.cells[i];
+            for (int s2 = 0; s2 < 2; ++s2) {
+                for (int d = 0; d < 4; ++d) lv[s2][d][q] = u.lv[i][s2][d];
+                code[s2][q] = u.code[i][s2]; cls[s2][q] = u.cls[i][s2];
+            }
+            std::memcpy(vcache[q], u.vcache[i], sizeof u.vcache[i]);
+        }
+        std::memcpy(vacc, u.vacc, sizeof vacc);
+        std::memcpy(clsCnt, u.clsCnt, sizeof clsCnt);
+        std::memcpy(candBits, u.candBits, sizeof candBits);
+    }
+
     // eval.hpp 에서 정의: 칸 c 의 가치 기여를 두 관점 누적값에 ±, 전체 재동기화
     void accCell(int c, int sign);
     void resyncModel();
@@ -217,9 +273,8 @@ private:
     }
     void put(int c, int col) {
         const auto& T = LineTables::get();
-        int aff[40], na = 0;
         const bool inc = model != nullptr;
-        if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
+        if (inc) accCell(c, -1);
         clsCnt[0][cls[0][c]]--; clsCnt[1][cls[1][c]]--;
         cls[0][c] = cls[1][c] = C_NONE;
         cell[c] = uint8_t(col);
@@ -229,41 +284,23 @@ private:
             for (int k = -4; k <= 4; ++k) {
                 if (!k) continue;
                 const int q = c + k * DIRS[d];
+                if (cell[q] != EMPTY) { lkey[d][q] |= uint16_t(col << (2 * slotOf(-k))); continue; }
+                // 가치 기여는 조합 코드·3x3 모양·돌 근접 여부로만 정해진다 → 바뀐 칸만 다시 계산
+                bool wasNear = false;
+                for (int e = 0; e < 4; ++e) wasNear |= keyHasStone(lkey[e][q]);
+                const uint16_t c0 = code[0][q], c1 = code[1][q];
                 lkey[d][q] |= uint16_t(col << (2 * slotOf(-k)));
-                if (cell[q] == EMPTY) updateLine(q, d, T);
+                updateLine(q, d, T);
+                if (inc && (!wasNear || k == 1 || k == -1 || code[0][q] != c0 || code[1][q] != c1)) {
+                    accCell(q, -1); accCell(q, +1);
+                }
             }
         for (int o : nearOffsets()) {                          // 주변 돌 수가 0→1 이 되는 빈칸만 후보 비트를 켠다
             const int q = c + o;
             if (q >= 0 && q < CELLS && nearCnt[q]++ == 0 && cell[q] == EMPTY) setCandBit(q, true);
         }
         setCandBit(c, false);
-        if (inc) { for (int i = 0; i < na; ++i) accCell(aff[i], +1); }
-    }
-    void remove(int c) {
-        const auto& T = LineTables::get();
-        int aff[40], na = 0;
-        const bool inc = model != nullptr;
-        if (inc) { na = affected(c, aff); for (int i = 0; i < na; ++i) accCell(aff[i], -1); }
-        const int col = cell[c];
-        cell[c] = EMPTY;
-        hash ^= Zobrist::get().z[col][c];
-        for (int j = 0; j < 8; ++j) sh[c + SHAPE_DX[j] + SHAPE_DY[j] * W] &= uint16_t(~(3 << (2 * (7 - j))));
-        for (int d = 0; d < 4; ++d)
-            for (int k = -4; k <= 4; ++k) {
-                if (!k) continue;
-                const int q = c + k * DIRS[d];
-                lkey[d][q] &= uint16_t(~(3 << (2 * slotOf(-k))));
-                if (cell[q] == EMPTY) updateLine(q, d, T);
-            }
-        for (int d = 0; d < 4; ++d) setLevels(c, d, T);
-        refreshCell(c, T);
-        clsCnt[0][cls[0][c]]++; clsCnt[1][cls[1][c]]++;
-        for (int o : nearOffsets()) {                          // 1→0 이 되는 빈칸만 후보 비트를 끈다
-            const int q = c + o;
-            if (q >= 0 && q < CELLS && --nearCnt[q] == 0 && cell[q] == EMPTY) setCandBit(q, false);
-        }
-        if (nearCnt[c] > 0) setCandBit(c, true);
-        if (inc) { for (int i = 0; i < na; ++i) accCell(aff[i], +1); }
+        if (inc) accCell(c, +1);
     }
     void updateLine(int q, int d, const LineTables& T) {
         clsCnt[0][cls[0][q]]--; clsCnt[1][cls[1][q]]--;
