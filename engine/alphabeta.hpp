@@ -194,7 +194,7 @@ struct Config {
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
-    bool qTT           = false; // 정지 탐색에서도 전치표 조회·저장 (수가 있는 노드만, 깊이 0 으로)
+    bool qTT           = true;  // 정지 탐색에서도 전치표 조회·저장 (수가 있는 노드만, 깊이 0 으로) — A/B +18, +14 Elo
 };
 
 struct Result {
