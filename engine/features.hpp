@@ -193,7 +193,7 @@ inline void valueFeatures(const Board& b, F&& emit) {
             if (cnt[k]) emit(L.CNT + (t * CLASS_NB + k) * 3 + std::min(cnt[k], 3) - 1);
     }
     emit(L.BIAS + (self == WHITE));
-    emit(L.PH + std::min(b.ply / 16, 14));
+    emit(L.PH + std::min((b.ply - b.nulls) / 16, 14));
 }
 
 // 정책용 전역 전술 등급: (자기 최고 등급 tier) × (상대 최고 등급 tier) = 25
@@ -233,6 +233,6 @@ inline void policyFeatures(const Board& b, int c, int tclass, F&& emit) {
 }
 
 constexpr int TAPER_PLY = 120;
-inline float taper(const Board& b) { return std::min(b.ply, TAPER_PLY) / float(TAPER_PLY); }
+inline float taper(const Board& b) { return std::min(b.ply - b.nulls, TAPER_PLY) / float(TAPER_PLY); }
 
 } // namespace gmk::feat

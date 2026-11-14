@@ -33,12 +33,15 @@ int main(int argc, char** argv) {
         for (int g = 0; g < 2; ++g) {
             Board ba, bb; ba.setModel(&ma); bb.setModel(&mb);
             o.toBoard(ba); o.toBoard(bb);
+            ba.pruneTrivial = a.num("a-trivial", 0) != 0; bb.pruneTrivial = a.num("b-trivial", 0) != 0;
             const int colorA = g == 0 ? ba.side : opp(ba.side);
             sa.tt.clear(); sa.clearHeuristics(); sb.tt.clear(); sb.clearHeuristics();
             int result = 0;   // +1 A 승, -1 B 승
             for (;;) {
                 const bool aMove = ba.side == colorA;
-                const ab::Result r = (aMove ? sa : sb).think(aMove ? ba : bb, ab::Limits{ab::MAX_PLY - 1, ms, 0});
+                Board& bd = aMove ? ba : bb;
+                bd.rootPly = bd.ply;
+                const ab::Result r = (aMove ? sa : sb).think(bd, ab::Limits{ab::MAX_PLY - 1, ms, 0});
                 (aMove ? na : nb) += double(r.nodes); (aMove ? ta : tb) += double(r.timeMs);
                 int m = r.bestMove;
                 if (m < 0 || !ba.isEmptyMove(m)) { for (int q = 0; q < NMOVES; ++q) if (ba.isEmptyMove(q)) { m = q; break; } }
