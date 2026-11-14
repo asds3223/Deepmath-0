@@ -158,6 +158,8 @@ struct Config {
     int  rpsMaxExtra   = 8;
     int  lmrDiv100     = 100;   // 로그형 늦은 수 감축 ln(d)·ln(i)·100/lmrDiv100 수 (0 = 끔), 실현 확률 감축에 더함
     int  tacCost       = 2;     // 전술 수(4·쌍삼 이상 만들기/막기)가 소모하는 깊이 — 반 수 연장 (A/B: +19, +22 Elo)
+    int  tacHiMin      = 0;     // 전술 등급(자기×2 + 상대)이 이 이상이면 tacHiCost 를 소모 (0 = 끔)
+    int  tacHiCost     = 1;
     int  forcedCost    = 0;     // 수가 하나뿐일 때(강제 응수) 소모 깊이 — 0 = 완전 연장 (A/B: 2→0 +23 Elo)
     bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
     bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
@@ -476,7 +478,7 @@ private:
             if constexpr (scored) {
                 if (n == 1) cost = cfg.forcedCost;
                 else if (singular && m == ttMove) cost = std::min(cfg.seCost, (mTac & 128) ? cfg.tacCost : ONE_PLY);
-                else if (mTac & 128) cost = cfg.tacCost;
+                else if (mTac & 128) cost = (cfg.tacHiMin && (mTac & 127) >= cfg.tacHiMin) ? cfg.tacHiCost : cfg.tacCost;
                 else if (mOrder < (1 << 29) - 1) {
                     if (!root) {
                         if (i >= mcLimit && best > -MATE_BOUND) continue;
