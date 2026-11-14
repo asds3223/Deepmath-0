@@ -139,7 +139,8 @@ public:
     bool oppFive() const   { return clsCnt[2 - side][C_FIVE] > 0; }
     bool oppThreat() const { const int* O = clsCnt[2 - side]; return O[C_FOUR3] + O[C_WINFOUR] > 0; }
     bool quietNode() const { return !oppFive() && !oppThreat() && !clsCnt[side - 1][C_FIVE]; }   // 전술 위기 없음
-    bool mustDefend() const { return oppFive(); }                       // 정지 탐색: 상대 4 는 막아야 한다
+    bool mustDefend() const { return oppFive(); }
+    bool hasAttack() const { const int* S = clsCnt[side - 1]; return S[C_DOUBLE3] + S[C_FOUR] + S[C_FOUR_PLUS] + S[C_FOUR3] + S[C_WINFOUR] > 0; }  // 쌍삼·4 이상을 만들 수 있음                       // 정지 탐색: 상대 4 는 막아야 한다
     int  defenseMoves(int* out) const;                                  // eval.hpp
     int  forcingMoves(int* out) const;                                  // eval.hpp: 4 를 만드는 수
 

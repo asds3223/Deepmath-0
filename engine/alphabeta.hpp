@@ -159,6 +159,7 @@ struct Config {
     int  rfpMargin     = 60;    //   정적평가 - rfpMargin·(d - improving) ≥ beta 면 즉시 반환 (0 = 끔)
     int  razorDepth    = 2;     // 레이저링 (A/B 2,000판: d2 ≈ +15 Elo): 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
     int  razorMargin   = 200;
+    bool razorNoAtk    = false; // 둘 차례에 공격 수(쌍삼·4 이상)가 있으면 레이저링 안 함 (정지 탐색은 4 만 보므로 쌍삼 공격을 놓친다)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
@@ -364,6 +365,7 @@ private:
                 return se;
             if constexpr (detail::HasQuiesce<P>::value)
                 if (cfg.razorDepth > 0 && !pvNode && !root && pos.quietNode() && dPly <= cfg.razorDepth &&
+                    !(cfg.razorNoAtk && pos.hasAttack()) &&
                     std::abs(alpha) < MATE_BOUND && se + cfg.razorMargin * std::max(dPly, 1) < alpha) {
                     const int v = qsearch(pos, alpha, alpha + 1, ply, 0);
                     if (v <= alpha) return v;

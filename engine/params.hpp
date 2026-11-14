@@ -32,6 +32,7 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"rfpDepth", &Config::rfpDepth},              {"rfpMargin", &Config::rfpMargin},
         {"useQuiesce", nullptr, &Config::useQuiesce}, {"qMaxPly", &Config::qMaxPly},
         {"razorDepth", &Config::razorDepth},          {"razorMargin", &Config::razorMargin},
+        {"razorNoAtk", nullptr, &Config::razorNoAtk},
         {"qTT", nullptr, &Config::qTT},
         {"tmDynamic", nullptr, &Config::tmDynamic},   {"tmDiv", &Config::tmDiv},
         {"tmHardDiv", &Config::tmHardDiv},
