@@ -322,12 +322,17 @@ inline int Board::forcingMoves(int* out) const {
     const int s = side - 1;
     const int* S = clsCnt[s];
     if (!(S[C_FOUR] + S[C_FOUR_PLUS] + S[C_FOUR3] + S[C_WINFOUR])) return 0;
+    // 4 를 만드는 칸은 반드시 돌 옆이라 후보 비트셋만 훑으면 된다. 출력: 등급 내림차순, 같은 등급은 칸 순서
     const int* cells = feat::boardCells();
+    int buf[4][NMOVES], cnt[4] = {0, 0, 0, 0};
+    for (int w = 0; w < 4; ++w)
+        for (uint64_t bits = candBits[w]; bits; bits &= bits - 1) {
+            const int m = w * 64 + __builtin_ctzll(bits);
+            const int k = cls[s][cells[m]];
+            if (k >= C_FOUR && k <= C_WINFOUR) buf[k - C_FOUR][cnt[k - C_FOUR]++] = m;
+        }
     int n = 0;
-    for (int k = C_WINFOUR; k >= C_FOUR; --k) {
-        if (!S[k]) continue;
-        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == k) out[n++] = m;
-    }
+    for (int k = 3; k >= 0; --k) for (int j = 0; j < cnt[k]; ++j) out[n++] = buf[k][j];
     return n;
 }
 
