@@ -9,5 +9,6 @@ MODEL=${MODEL:-$ROOT/models/c3.dce}; OPEN=${OPEN:-$ROOT/data/r1_val.bin}; PAIRS=
 cd "$ROOT/data/net"
 "$ROOT/build/oracle/oracle" match --model "$MODEL" --data "$OPEN" --ours search --ms "$ms" --rapfi search \
     --rapfi-nodes "${RNODES:-4000}" ${RCLS:+--rapfi-classical 1} --pairs "$PAIRS" --offset 17 --stride 3 "$@" 2>/dev/null \
-  | grep -E "RESULT|ours:|rapfi:" | tr '\n' ' ' \
-  | awk -v n="$name" '{split($2,a,"=");split($4,b,"=");printf "%-30s %3d-%3d %.1f%% | ours %s nodes %s ms | rapfi %s nodes %s ms\n",n,a[2],b[2],100*a[2]/(a[2]+b[2]),$9,$11,$14,$16}'
+  | grep -E "RESULT|ours:|rapfi:" | tee /dev/stderr | tr '\n' ' ' \
+  | awk -v n="$name" '{split($2,a,"=");split($3,d,"=");split($4,b,"=");t=a[2]+d[2]+b[2];
+      printf "%-30s %d-%d-%d %.1f%% (무승부 0.5점) | ours %s nodes %s ms | rapfi %s nodes %s ms\n",n,a[2],d[2],b[2],100*(a[2]+d[2]/2)/t,$9,$11,$14,$16}'
