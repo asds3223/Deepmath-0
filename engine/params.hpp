@@ -32,6 +32,8 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"ttWays", &Config::ttWays},                  {"contW", &Config::contW},
         {"histMalus", nullptr, &Config::histMalus},   {"razorDepth", &Config::razorDepth},
         {"razorMargin", &Config::razorMargin},        {"mcpBase", &Config::mcpBase},
+        {"tacW", &Config::tacW},                      {"histDiv", &Config::histDiv},
+        {"qThreatPen", &Config::qThreatPen},
     };
     return d;
 }

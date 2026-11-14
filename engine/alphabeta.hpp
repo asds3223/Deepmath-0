@@ -16,7 +16,8 @@
 //   bool leafProbe(int ply, int& score) const;
 //       정확히 판정되는 전술 상황(즉승, 막을 수 없는 쌍사)이면 true 와 루트 기준 메이트 점수.
 //   int  generateScored(int* out, int* score, uint8_t* tactical) const;  bool quietNode() const;
-//       정렬하지 않은 후보 + 정책 점수(로짓×256) + 전술 수 표시. 있으면 선택 탐색을 켠다:
+//       정렬하지 않은 후보 + 정책 점수(로짓×256) + 전술 바이트(최상위 비트 = 전술 수, 하위 7비트 = 전술 등급).
+//       있으면 선택 탐색을 켠다:
 //         · 수 정렬: TT → 킬러 → 반박수 → 히스토리 + 정책
 //         · 실현 확률 깊이: 정책 1위와의 로짓 차이만큼 깊이를 더 소모 + 로그형 늦은 수 감축 (가산)
 //         · 정책 간격 컷, 남은 깊이별 조용한 수 예산, 정적 문턱 (비전술 수만)
@@ -169,8 +170,11 @@ struct Config {
     int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
     int  contW         = 0;     // 연속 히스토리(상대 직전 수 → 이 수) 정렬 가중 (0 = 끔)
     bool histMalus     = false; // 컷을 못 낸 조용한 수에 히스토리 감점
-    int  razorDepth    = 0;     // 레이저링: 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
+    int  qThreatPen    = 0;     // 정지 탐색: 상대 열린 3 류 위협이 있는데 기준값을 쓰면 이만큼 깎는다 (0 = 끔)
+    int  razorDepth    = 2;     // 레이저링 (A/B 2,000판: d2 ≈ +15 Elo): 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
     int  razorMargin   = 200;
+    int  tacW          = 0;     // 정렬에 전술 등급 × tacW 를 더함 (0 = 끔)
+    int  histDiv       = 1;     // 정렬에서 히스토리를 이 값으로 나눔 (1 = 그대로)
     int  mcpBase       = 0;     // 수 개수 가지치기: (mcpBase + d^1.3)/(개선 없으면 2) 번째 이후 비전술 수 생략 (0 = 끔)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
@@ -394,8 +398,8 @@ private:
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
             const int m = moves[i];
-            int base = history_[side][m];
-            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
+            int base = history_[side][m] / cfg.histDiv;
+            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4 + cfg.tacW * (tac[i] & 127);
             if (cfg.contW && prevMove >= 0) base += cfg.contW * cont_[prevMove][m] / 4;
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
@@ -425,7 +429,7 @@ private:
             int extra = 0, cost = ONE_PLY;
             if constexpr (scored) {
                 if (n == 1) cost = cfg.forcedCost;
-                else if (!mTac && mOrder < (1 << 29) - 1) {
+                else if (!(mTac & 128) && mOrder < (1 << 29) - 1) {
                     if (!root) {
                         if (i >= mcLimit && best > -MATE_BOUND) continue;
                         if (cfg.usePolicyCut && i >= cfg.cutMinKeep && (smax - mScore) / 256 > cfg.cutGap) continue;
@@ -518,7 +522,9 @@ private:
             best = -INF;
             if (n == 0) return -(MATE - ply - 3);
         } else {
-            const int stand = pos.evaluate();
+            int stand = pos.evaluate();
+            if constexpr (detail::HasScored<P>::value)
+                if (cfg.qThreatPen && !pos.quietNode()) stand -= cfg.qThreatPen;   // 막지 않은 상대 위협
             if (stand >= beta || qply >= cfg.qMaxPly) return stand;
             if (stand > alpha) alpha = stand;
             best = stand;
