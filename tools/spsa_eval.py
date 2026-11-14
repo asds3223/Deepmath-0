@@ -15,6 +15,7 @@ ap.add_argument('--workers', type=int, default=4)
 ap.add_argument('--eval-openings', type=int, default=400)
 ap.add_argument('--out', default=os.path.join(ROOT, 'data', 'spsa'))
 ap.add_argument('--seed', type=int, default=1)
+ap.add_argument('--resume', action='store_true', help='iter.log 의 마지막 반복에서 이어서 (난수 순서를 재생해 같은 일정 유지)')
 args = ap.parse_args()
 os.makedirs(args.out, exist_ok=True)
 NAMES = ['CS', 'CO', 'J', 'INIT', 'CNT', 'PSQ', 'SH', 'BIAS+PH']
@@ -47,10 +48,16 @@ def run_jobs(jobs):
 
 rng = random.Random(args.seed)
 theta = [1.0] * K
-log = open(os.path.join(args.out, 'iter.log'), 'w')
+start, games = 0, 0
+if args.resume:
+    last = json.loads(open(os.path.join(args.out, 'iter.log')).read().strip().splitlines()[-1])
+    start, theta, games = last['k'] + 1, last['theta'], last['games']
+    for _ in range(start):                     # 끊기기 전과 같은 난수 순서를 재생
+        [rng.choice((-1, 1)) for _ in range(K)]; rng.randrange(N_OPEN // 2); rng.randrange(N_OPEN // 2)
+    print('resume at iter %d, games %d' % (start, games), flush=True)
+log = open(os.path.join(args.out, 'iter.log'), 'a' if args.resume else 'w')
 t0 = time.time()
-games = 0
-for k in range(args.iters):
+for k in range(start, args.iters):
     ck = C0 / (k + 1) ** GAMMA
     ak = A0 / (k + 1 + ABIG) ** ALPHA
     delta = [rng.choice((-1, 1)) for _ in range(K)]
