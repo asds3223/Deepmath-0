@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
         ab::Searcher<Board> s(size_t(a.num("tt-mb", 64)));
         s.cfg = cfg;
         size_t n = 0, agree = 0, verdict = 0, rWin = 0, rWinFound = 0, rLoss = 0, rLossFound = 0;
-        double depthSum = 0, nodeSum = 0, msSum = 0, intSum = 0, srchSum = 0, cf = 0, ct = 0, qn = 0;
+        double depthSum = 0, nodeSum = 0, msSum = 0, intSum = 0, srchSum = 0, cf = 0, ct = 0, qn = 0, bt[2][3] = {};
         for (const Record& r : recs) {
             if (!searchLabelled(r)) continue;
             if (n >= limit) break;
@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
             if (r.srchWR >= 0.999f) { ++rWin; rWinFound += res.score >= ab::MATE_BOUND; }
             if (r.srchWR <= 0.001f) { ++rLoss; rLossFound += res.score <= -ab::MATE_BOUND; }
             depthSum += res.depth; nodeSum += double(res.nodes); msSum += double(res.timeMs);
+            for (int x = 0; x < 2; ++x) for (int y = 0; y < 3; ++y) bt[x][y] += double(res.byType[x][y]);
             intSum += double(res.interior); srchSum += double(res.searched); cf += double(res.cutFirst); ct += double(res.cutTotal); qn += double(res.qnodes);
         }
         if (!n) { std::printf("no search-labelled records\n"); return 0; }
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
                     n, double(agree) / n, double(verdict) / n, depthSum / n, nodeSum / n, msSum / n, perSec(nodeSum, msSum));
         std::printf("[search] branching: searched/interior=%.2f first-move-cut=%.3f qnode-share=%.3f interior-share=%.3f\n",
                     intSum > 0 ? srchSum / intSum : 0, ct > 0 ? cf / ct : 0, nodeSum > 0 ? qn / nodeSum : 0, nodeSum > 0 ? intSum / nodeSum : 0);
+        std::printf("[search] node share by entering move: root-side atk=%.3f def=%.3f quiet=%.3f | opp-side atk=%.3f def=%.3f quiet=%.3f\n",
+                    bt[0][0] / nodeSum, bt[0][1] / nodeSum, bt[0][2] / nodeSum, bt[1][0] / nodeSum, bt[1][1] / nodeSum, bt[1][2] / nodeSum);
         std::printf("[search] Rapfi-says-WIN n=%zu ours-found-mate=%.3f | Rapfi-says-LOSS n=%zu ours-found-mated=%.3f\n",
                     rWin, rWin ? double(rWinFound) / rWin : 0, rLoss, rLoss ? double(rLossFound) / rLoss : 0);
         return 0;

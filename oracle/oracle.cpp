@@ -137,7 +137,7 @@ float rapfiClassicalWR(Pair& p) {
     return Config::valueToWinRate(v);
 }
 
-struct SearchOut { int best; float wr; int depth; };
+struct SearchOut { int best; float wr; int depth; int value = 0; };
 uint64_t g_rsNodes = 0, g_rsMoves = 0; double g_rsMs = 0;
 
 SearchOut rapfiSearch(Pair& p, uint64_t nodes, int64_t turnMs = 0) {
@@ -161,6 +161,7 @@ SearchOut rapfiSearch(Pair& p, uint64_t nodes, int64_t turnMs = 0) {
         s.best  = b.x() + b.y() * gmk::BS;
         s.wr    = Config::valueToWinRate(rm[0].value);
         s.depth = rm[0].selDepth;
+        s.value = int(rm[0].value);
     }
     p.resyncAfterSearch();
     return s;
@@ -477,6 +478,8 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
     const bool diag = get(a, "diag", 0) != 0 && get(a, "rapfi-classical", 0) == 0;     // 우리 수마다 NNUE 기준 손해(regret) 분포 기록
     double regSum = 0; long regN = 0, reg05 = 0, reg15 = 0, reg30 = 0; double regByPhase[3] = {0, 0, 0}; long nByPhase[3] = {0, 0, 0};
     int win = 0, draw = 0, loss = 0; long moves = 0;
+    FILE* saveF = nullptr;
+    if (const std::string sp = get<std::string>(a, "save", ""); !sp.empty()) saveF = std::fopen(sp.c_str(), "a");
     for (int pi = 0; pi < pairs; ++pi) {
         const gmk::Record& o = opens[(size_t(offset) + size_t(pi) * stride * 7919) % opens.size()];
         const std::vector<int> seq = replaySeq(o);
@@ -488,6 +491,7 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
             const int oursColor = g == 0 ? ob.side : gmk::opp(ob.side);
             srch.tt.clear(); srch.clearHeuristics();
             int result = 0;
+            std::vector<int> played(seq);
             while (true) {
                 const bool oursTurn = ob.side == oursColor;
                 float wrBefore = -1;
@@ -506,7 +510,7 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
                     m = fn == 1 ? fm[0] : rapfiSearch(p, rnodes, rms).best;
                 } else m = rapfiMixed ? pickRapfiMixed(p) : pickRapfi(p, rapfiPolicy);
                 if (m < 0 || !ob.isEmptyMove(m)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { m = q; break; } }
-                p.move(m); ob.make(m); ++moves;
+                p.move(m); ob.make(m); ++moves; played.push_back(m);
                 if (wrBefore >= 0 && !ob.isLoss()) {
                     // 우리 수 직후 상대 차례 NNUE 승률 → 우리 관점 = 1 - 그 값. 손해 = 수 전 승률 - 수 후 승률
                     auto v = p.rb->evaluator()->evaluateValue(*p.rb);
@@ -519,8 +523,14 @@ int cmdMatch(const std::map<std::string, std::string>& a) {
                 if (ob.isDraw()) break;
             }
             (result > 0 ? win : result < 0 ? loss : draw)++;
+            if (saveF) {   // 한 줄 = 결과(우리 기준) 우리색 오프닝길이 수...
+                std::fprintf(saveF, "%d %d %zu", result, oursColor, seq.size());
+                for (int mv : played) std::fprintf(saveF, " %d", mv);
+                std::fprintf(saveF, "\n");
+            }
         }
     }
+    if (saveF) std::fclose(saveF);
     std::printf("RESULT ours_win=%d draw=%d ours_loss=%d games=%d avg-moves=%.1f nnue-used=%.3f\n", win, draw, loss,
                 win + draw + loss, double(moves) / std::max(1, win + draw + loss),
                 g_mixCalls ? double(g_mixNN) / g_mixCalls : -1.0);
@@ -572,6 +582,113 @@ int cmdDepthCmp(const std::map<std::string, std::string>& a) {
 } // namespace
 
 
+
+// ── blunders: 저장한 대국(match --save)의 패배를 분해한다 ──
+//   심판 = Rapfi NNUE 탐색(--judge-nodes). 패배마다 결정적 실수(심판 승률 하락이 가장 큰 우리 수, 수 전 승률 ≥ 0.3)를 찾고
+//   (1) 전술 여부: 실수 직후 심판이 메이트 점수를 내는가  (2) 우리 탐색이 노드 1×/10×/100× 에서 고치는가
+//   (3) 심판 최선수의 우리 정책 순위·전술 표시  (4) 우리 정적평가가 두 수 중 어느 쪽을 선호하는가
+int cmdBlunders(const std::map<std::string, std::string>& a) {
+    gmk::Model mdl;
+    if (!mdl.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
+    const uint64_t jn = get<uint64_t>(a, "judge-nodes", 200000), on = get<uint64_t>(a, "nodes", 10000);
+    const int skip = get(a, "skip", 0), every = get(a, "every", 1), limit = get(a, "limit", 1000000);
+    ab::Searcher<gmk::Board> srch(64);
+    ab::applyParams(srch.cfg, a);
+    std::FILE* f = std::fopen(get<std::string>(a, "games", "").c_str(), "r");
+    if (!f) { std::fprintf(stderr, "cannot open games\n"); return 1; }
+    auto setPos = [&](Pair& p, gmk::Board& ob, const std::vector<int>& mv, size_t k) {
+        p.reset(); ob.clear(); ob.setModel(&mdl);
+        for (size_t i = 0; i < k; ++i) { p.move(mv[i]); ob.make(mv[i]); }
+    };
+    auto judge = [&](const std::vector<int>& mv, size_t k, SearchOut& out) {   // 국면 k (mv[0..k) 둔 뒤), 둘 차례 관점
+        Pair p; gmk::Board ob; setPos(p, ob, mv, k);
+        if (ob.isLoss()) { out = SearchOut{-1, 0.f, 0, -int(VALUE_MATE)}; return; }
+        out = rapfiSearch(p, jn);
+    };
+    auto isMate = [](int v) { return std::abs(v) >= int(VALUE_MATE_IN_MAX_PLY); };
+    char line[1 << 16];
+    int gi = -1, analysed = 0;
+    long nTact = 0, nFix1 = 0, nFix10 = 0, nFix100 = 0, nInGen = 0, nRankTop3 = 0, nEvalPrefersBlunder = 0, nBestAtk = 0, nBestDef = 0;
+    long rankSum = 0, nGradual = 0, nLostEarly = 0;
+    while (std::fgets(line, sizeof line, f)) {
+        ++gi;
+        std::vector<int> v; { char* q = line; char* e; for (long x; (x = std::strtol(q, &e, 10)), e != q; q = e) v.push_back(int(x)); }
+        if (v.size() < 4) continue;
+        const int result = v[0], oursColor = v[1]; const size_t openLen = size_t(v[2]);
+        std::vector<int> mv(v.begin() + 3, v.end());
+        if (result >= 0 || gi < skip || (gi - skip) % every) continue;
+        if (analysed >= limit) break;
+        // 모든 국면 심판
+        std::vector<SearchOut> J(mv.size() + 1);
+        for (size_t k = openLen; k <= mv.size(); ++k) judge(mv, k, J[k]);
+        // 결정적 실수
+        int bk = -1; float bReg = -1;
+        for (size_t k = openLen; k < mv.size(); ++k) {
+            const int sideK = (k % 2 == 0) ? gmk::BLACK : gmk::WHITE;
+            if (sideK != oursColor) continue;
+            const float before = J[k].wr, after = 1.f - J[k + 1].wr;
+            if (before < 0.3f) continue;
+            if (before - after > bReg) { bReg = before - after; bk = int(k); }
+        }
+        if (bk < 0) { std::printf("game %d: lost from the opening (judge < 0.3 throughout)\n", gi); ++nLostEarly; continue; }
+        if (bReg < 0.2f) { std::printf("game %d: gradual loss (largest regret %.2f at ply %d)\n", gi, bReg, bk); ++nGradual; continue; }
+        ++analysed;
+        const size_t k = size_t(bk);
+        const int ourMove = mv[k], best = J[k].best;
+        const bool tactical = isMate(J[k + 1].value) || isMate(J[k].value);
+        nTact += tactical;
+        // 정책 순위·전술 표시
+        Pair p; gmk::Board ob; setPos(p, ob, mv, k);
+        int gm[gmk::NMOVES], ps[gmk::NMOVES]; uint8_t tc[gmk::NMOVES];
+        const int n = ob.generateScored(gm, ps, tc);
+        int rank = -1, rankOurs = -1; uint8_t bestTac = 0;
+        for (int i = 0; i < n; ++i) {
+            int r = 0; for (int j = 0; j < n; ++j) r += ps[j] > ps[i];
+            if (gm[i] == best) { rank = r; bestTac = tc[i]; }
+            if (gm[i] == ourMove) rankOurs = r;
+        }
+        if (rank >= 0) { ++nInGen; rankSum += rank; nRankTop3 += rank < 3; }
+        nBestAtk += (bestTac & 64) != 0; nBestDef += (bestTac & 128) && !(bestTac & 64);
+        // 정적평가 선호 (우리 관점)
+        auto childEval = [&](int m) { ob.make(m); const int e = ob.isLoss() ? 30000 : -ob.evaluate(); ob.undo(m); return e; };
+        const int eOurs = childEval(ourMove), eBest = best >= 0 && ob.isEmptyMove(best) ? childEval(best) : 0;
+        nEvalPrefersBlunder += eOurs > eBest;
+        // 노드를 늘리면 고치는가 (선택 수의 심판 손해 < 0.1)
+        std::map<int, float> regCache; regCache[ourMove] = bReg;
+        auto regretOf = [&](int m) {
+            if (auto it = regCache.find(m); it != regCache.end()) return it->second;
+            std::vector<int> c(mv.begin(), mv.begin() + k); c.push_back(m);
+            SearchOut s; judge(c, k + 1, s);
+            const float r = J[k].wr - (1.f - s.wr);
+            return regCache[m] = r;
+        };
+        int pick[3]; float preg[3];
+        for (int t = 0; t < 3; ++t) {
+            setPos(p, ob, mv, k);
+            srch.tt.clear(); srch.clearHeuristics();
+            const uint64_t nodes = on * (t == 0 ? 1 : t == 1 ? 10 : 100);
+            pick[t] = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, -1, nodes}).bestMove;
+            preg[t] = regretOf(pick[t]);
+        }
+        nFix1 += preg[0] < 0.1f; nFix10 += preg[1] < 0.1f; nFix100 += preg[2] < 0.1f;
+        std::printf("game %d ply %zu: regret %.2f (wr %.2f->%.2f) %s | judge best %d rank %d %s, ours %d rank %d | eval ours %d best %d | "
+                    "1x %d(%.2f) 10x %d(%.2f) 100x %d(%.2f)\n",
+                    gi, k, bReg, J[k].wr, 1.f - J[k + 1].wr, tactical ? "TACT" : "pos ", best, rank,
+                    (bestTac & 64) ? "atk" : (bestTac & 128) ? "def" : "quiet", ourMove, rankOurs, eOurs, eBest,
+                    pick[0], preg[0], pick[1], preg[1], pick[2], preg[2]);
+        std::fflush(stdout);
+    }
+    std::fclose(f);
+    if (analysed) {
+        const double N = analysed;
+        std::printf("SUMMARY gradual-losses=%ld lost-from-opening=%ld | decisive-errors=%d tactical=%.2f fixed@1x=%.2f fixed@10x=%.2f fixed@100x=%.2f | judge-best in our moves=%.2f "
+                    "top3=%.2f avg-rank=%.1f atk=%.2f def=%.2f | our eval prefers the blunder=%.2f\n",
+                    nGradual, nLostEarly, analysed, nTact / N, nFix1 / N, nFix10 / N, nFix100 / N, nInGen / N, nRankTop3 / N,
+                    nInGen ? double(rankSum) / nInGen : -1, nBestAtk / N, nBestDef / N, nEvalPrefersBlunder / N);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: oracle <gen|label|bench> [--config path] [options]\n");
@@ -586,6 +703,7 @@ int main(int argc, char** argv) {
     if (mode == "bench") return cmdBench(a);
     if (mode == "match") return cmdMatch(a);
     if (mode == "depthcmp") return cmdDepthCmp(a);
+    if (mode == "blunders") return cmdBlunders(a);
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;
 }

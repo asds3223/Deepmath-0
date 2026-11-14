@@ -179,6 +179,7 @@ struct Result {
     uint64_t searched = 0;      // 내부 노드에서 탐색한 자식 (searched/interior = 실효 분기)
     uint64_t cutFirst = 0, cutTotal = 0;   // 베타 컷 중 첫 수에서 난 비율 = 정렬 품질
     uint64_t qnodes   = 0;      // 정지 탐색 노드
+    uint64_t byType[2][3] = {};  // 진단: 노드를 만든 직전 수의 [두는 쪽 0=루트 쪽 1=상대][0 공격 1 방어 2 조용] 별 노드 수
 };
 
 // 실전 시간 배분: 수당 제한 turnMs, 남은 대국 시간 leftMs(<0 이면 없음) → Limits 의 하드/소프트 시간
@@ -216,6 +217,7 @@ public:
     Result think(P& pos, const Limits& lim) {
         lim_ = lim; nodes_ = 0; stopped_ = false; selDepth_ = 0;
         interior_ = searched_ = cutFirst_ = cutTotal_ = qnodes_ = 0;
+        std::memset(byType_, 0, sizeof(byType_));
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
         tt.newSearch();
@@ -287,6 +289,7 @@ private:
     void fillStats(Result& r) const {
         r.nodes = nodes_; r.timeMs = elapsedMs(); r.selDepth = selDepth_;
         r.interior = interior_; r.searched = searched_; r.cutFirst = cutFirst_; r.cutTotal = cutTotal_; r.qnodes = qnodes_;
+        std::memcpy(r.byType, byType_, sizeof(byType_));
     }
     void buildLmr() {
         for (int d = 0; d < 64; ++d) for (int i = 0; i < 64; ++i)
@@ -311,6 +314,7 @@ private:
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
         ++nodes_;
+        if (ply > 0) ++byType_[(ply - 1) & 1][enterType_[ply]];
         if (ply > selDepth_) selDepth_ = ply;
 
         const bool root   = (ply == 0);
@@ -458,6 +462,7 @@ private:
                 }
             }
 
+            enterType_[ply + 1] = uint8_t((mTac & 64) ? 0 : (mTac & 128) ? 1 : 2);
             pos.make(m);
             ++searched_;
             moveStack_[ply] = m;
@@ -519,6 +524,7 @@ private:
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
         ++nodes_; ++qnodes_;
+        if (ply > 0) ++byType_[(ply - 1) & 1][enterType_[ply]];
         if (ply > selDepth_) selDepth_ = ply;
         if (pos.isLoss()) return -MATE + ply;
         if (pos.isDraw()) return 0;
@@ -553,7 +559,9 @@ private:
             n = pos.forcingMoves(moves);
             if (n && useQTT) { int s; if (probeQ(s)) return s; }
         }
+        const uint8_t qType = pos.mustDefend() ? 1 : 0;   // 막기 = 방어, 4 = 공격
         for (int i = 0; i < n; ++i) {
+            enterType_[ply + 1] = qType;
             pos.make(moves[i]);
             const int s = -qsearch(pos, -beta, -alpha, ply + 1, qply + 1);
             pos.undo(moves[i]);
@@ -579,6 +587,8 @@ private:
     uint64_t          nodes_ = 0;
     int               selDepth_ = 0;
     uint64_t          interior_ = 0, searched_ = 0, cutFirst_ = 0, cutTotal_ = 0, qnodes_ = 0;
+    uint64_t          byType_[2][3] = {};
+    uint8_t           enterType_[MAX_PLY + 2] = {};
     bool              stopped_ = false;
     std::atomic<bool> stopFlag_{false};
     Clock::time_point start_;
