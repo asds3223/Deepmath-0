@@ -689,6 +689,65 @@ int cmdBlunders(const std::map<std::string, std::string>& a) {
     return 0;
 }
 
+// ── spsaworker: 가치 표 묶음 배율로 만든 모델로 대 Rapfi (같은 시간) 대국. 표준입력 한 줄 = 한 작업 ──
+//   입력: "<오프닝 번호> m0 m1 ... m7"  (묶음: CS CO J INIT CNT PSQ SH BIAS+PH)
+//   출력: "R <우리 점수 합> <판 수>"  (색 바꿔 2판)
+int cmdSpsaWorker(const std::map<std::string, std::string>& a) {
+    gmk::Model base;
+    if (!base.load(get<std::string>(a, "model", ""))) { std::fprintf(stderr, "cannot load model\n"); return 1; }
+    if (get(a, "rapfi-classical", 1) != 0) Search::Threads.setupEvaluator(nullptr);
+    const int64_t ms = get<int64_t>(a, "ms", 100), rms = get<int64_t>(a, "rapfi-ms", ms);
+    std::vector<gmk::Record> recs, opens;
+    gmk::readRecords(get<std::string>(a, "data", ""), recs);
+    for (auto& r : recs)
+        if (!(r.flags & (gmk::REC_SIBLING | gmk::REC_LEAF | gmk::REC_SELF_FIVE | gmk::REC_OPPO_FIVE)) && r.ply >= 4 &&
+            r.ply <= 10 && std::fabs(r.nnWinrate() - 0.5f) < 0.2f) opens.push_back(r);
+    std::fprintf(stderr, "[spsaworker] openings %zu\n", opens.size());
+    const auto& L = gmk::feat::Layout::get();
+    const int lo[8] = {L.CS, L.CO, L.J, L.INIT, L.CNT, L.PSQ, L.SH, L.BIAS};
+    const int hi[8] = {L.CO, L.J, L.INIT, L.CNT, L.PSQ, L.SH, L.BIAS, L.NV};
+    ab::Searcher<gmk::Board> srch(64);
+    ab::applyParams(srch.cfg, a);
+    char line[4096];
+    while (std::fgets(line, sizeof line, stdin)) {
+        long oi; double m[8];
+        if (std::sscanf(line, "%ld %lf %lf %lf %lf %lf %lf %lf %lf", &oi, &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &m[6], &m[7]) != 9) break;
+        gmk::Model mdl = base;
+        for (int g = 0; g < 8; ++g)
+            for (int i = lo[g]; i < hi[g]; ++i) { mdl.wv[2 * size_t(i)] *= float(m[g]); mdl.wv[2 * size_t(i) + 1] *= float(m[g]); }
+        mdl.quantize();
+        const gmk::Record& o = opens[size_t(oi) % opens.size()];
+        const std::vector<int> seq = replaySeq(o);
+        double score = 0; int games = 0;
+        for (int g = 0; g < 2 && !seq.empty(); ++g) {
+            Pair p; p.reset();
+            gmk::Board ob; ob.setModel(&mdl);
+            for (int mv : seq) { p.move(mv); ob.make(mv); }
+            const int oursColor = g == 0 ? ob.side : gmk::opp(ob.side);
+            srch.tt.clear(); srch.clearHeuristics();
+            int result = 0;
+            while (true) {
+                const bool oursTurn = ob.side == oursColor;
+                int mv;
+                if (oursTurn) mv = srch.think(ob, ab::Limits{ab::MAX_PLY - 1, ms, 0}).bestMove;
+                else {
+                    const gmk::Model* keep = p.gb.model; p.gb.model = nullptr;
+                    int fm[gmk::NMOVES]; const int fn = p.gb.generate(fm); p.gb.model = keep;
+                    mv = fn == 1 ? fm[0] : rapfiSearch(p, 0, rms).best;
+                }
+                if (mv < 0 || !ob.isEmptyMove(mv)) { for (int q = 0; q < gmk::NMOVES; ++q) if (ob.isEmptyMove(q)) { mv = q; break; } }
+                p.move(mv); ob.make(mv);
+                if (ob.isLoss()) { result = oursTurn ? 1 : -1; break; }
+                if (ob.isDraw()) break;
+            }
+            score += result > 0 ? 1.0 : result == 0 ? 0.5 : 0.0; ++games;
+        }
+        std::printf("R %.1f %d\n", score, games);
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: oracle <gen|label|bench> [--config path] [options]\n");
@@ -704,6 +763,7 @@ int main(int argc, char** argv) {
     if (mode == "match") return cmdMatch(a);
     if (mode == "depthcmp") return cmdDepthCmp(a);
     if (mode == "blunders") return cmdBlunders(a);
+    if (mode == "spsaworker") return cmdSpsaWorker(a);
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;
 }
