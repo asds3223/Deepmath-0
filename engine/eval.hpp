@@ -174,7 +174,7 @@ inline int Board::evaluate() const {
                 if (cnt[k]) add(L.CNT + (t * CLASS_NB + k) * 3 + std::min(cnt[k], 3) - 1);
         }
         add(L.BIAS + (side == WHITE));
-        add(L.PH + std::min((ply - nulls) / 16, 14));
+        add(L.PH + std::min(ply / 16, 14));
         const float t = feat::taper(*this);
         float v = (float(s0) * (1 - t) + float(s1) * t) / 16.f;
         const float lim = float(ab::MATE_BOUND - 1);
@@ -208,12 +208,10 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
         for (int i = 0; i < nd; ++i) { const int c = cells[defs[i]]; out[i] = defs[i]; tactical[i] = uint8_t(TAC_FLAG | (classGrade(cls[s][c]) * 2 + classGrade(cls[o][c]))); }
         n = nd;
     } else {
-        const bool trivialCut = pruneTrivial && ply > rootPly;
         for (int w = 0; w < 4; ++w)
             for (uint64_t bits = candBits[w]; bits; bits &= bits - 1) {
                 const int m = w * 64 + __builtin_ctzll(bits);
                 const int c = cells[m];
-                if (trivialCut && !keyHasStone(sh[c]) && cls[s][c] == C_NONE && cls[o][c] == C_NONE) continue;
                 out[n] = m;
                 tactical[n] = uint8_t(((cls[s][c] >= TACTICAL_CLASS || cls[o][c] >= TACTICAL_CLASS) ? TAC_FLAG : 0) |
                                       (classGrade(cls[s][c]) * 2 + classGrade(cls[o][c])));

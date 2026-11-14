@@ -36,10 +36,7 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"razorMargin", &Config::razorMargin},        {"mcpBase", &Config::mcpBase},
         {"tacW", &Config::tacW},                      {"histDiv", &Config::histDiv},
         {"qThreatPen", &Config::qThreatPen},          {"cutNodeRed", &Config::cutNodeRed},
-        {"seDepth", &Config::seDepth},                {"seMargin", &Config::seMargin},
-        {"seCost", &Config::seCost},
-        {"nmpDepth", &Config::nmpDepth},              {"nmpR", &Config::nmpR},
-        {"nmpDiv", &Config::nmpDiv},                  {"qTT", nullptr, &Config::qTT},                  {"seMultiCut", nullptr, &Config::seMultiCut},
+        {"qTT", nullptr, &Config::qTT},
     };
     return d;
 }

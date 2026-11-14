@@ -56,17 +56,13 @@ public:
     uint8_t  cls[2][CELLS];           // 칸 등급
     uint8_t  nearCnt[CELLS];          // 후보 반경 내 돌 수
     int      clsCnt[2][CLASS_NB];     // 빈칸 등급 개수 (색별)
-    static constexpr int HIST = NMOVES + 64;   // 널 수(패스)로 ply 가 돌 수보다 커질 수 있다
-    int      hist[HIST];
-    uint8_t  fiveMade[HIST];
-    int      nulls = 0;                // 현재 쌓인 널 수 개수
+    int      hist[NMOVES + 1];
+    uint8_t  fiveMade[NMOVES + 1];
     int      ply  = 0;
     int      side = BLACK;
     uint64_t hash = 0;
 
     const Model* model = nullptr;     // 직접 대입하지 말고 setModel() 을 쓸 것 (증분 상태 재동기화)
-    bool pruneTrivial = false;
-    int  rootPly = 0;                 // 탐색 시작 국면의 수 (루트는 가지치지 않기 위해 — 탐색 측이 설정)        // 후보에서 "이웃 8칸에 돌이 없고 양쪽 모두 위협 등급 없음" 칸 제외 (루트 제외)
 
     // ── 증분 평가 상태 (model 이 붙어 있을 때만 유지) ──
     int32_t  vacc[2][2];              // [관점 P(0=흑이 self)][테이퍼 세트] 칸 단위 가치 합 (점수×16)
@@ -109,7 +105,7 @@ public:
             refreshCell(c, T);
             clsCnt[0][cls[0][c]]++; clsCnt[1][cls[1][c]]++;
         }
-        ply = 0; side = BLACK; hash = 0; nulls = 0;
+        ply = 0; side = BLACK; hash = 0;
         hist[0] = -1; fiveMade[0] = 0;
         std::memset(candBits, 0, sizeof(candBits));
         resyncModel();
@@ -131,12 +127,8 @@ public:
         side = opp(side);
         restoreUndo(ply, toCell(m));
     }
-    // 널 수: 둘 차례만 넘긴다 (널 수 가지치기용). 직전 수 = -1
-    bool canNull() const { return ply + 1 < HIST && (ply == 0 || hist[ply - 1] >= 0); }
-    void makeNull() { fiveMade[ply] = 0; hist[ply++] = -1; ++nulls; side = opp(side); }
-    void undoNull() { --ply; --nulls; side = opp(side); }
     bool isLoss() const { return ply > 0 && fiveMade[ply - 1]; }
-    bool isDraw() const { return ply - nulls >= NMOVES; }
+    bool isDraw() const { return ply >= NMOVES; }
     int  evaluate() const;                                              // eval.hpp
     int  generate(int* out) const;                                      // eval.hpp: 정책 점수 순
     int  generateScored(int* out, int* score, uint8_t* tactical) const; // eval.hpp: 탐색용 (정렬 없음)
@@ -208,7 +200,7 @@ private:
         int      clsCnt[2][CLASS_NB];
         uint64_t candBits[4];
     };
-    std::vector<UndoRec> undo_ = std::vector<UndoRec>(HIST);
+    std::vector<UndoRec> undo_ = std::vector<UndoRec>(NMOVES + 1);
 
     void saveUndo(int at, int c) {
         UndoRec& u = undo_[at];

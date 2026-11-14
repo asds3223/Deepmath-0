@@ -60,10 +60,6 @@ template <class P, class = void> struct HasQuiesce : std::false_type {};
 template <class P>
 struct HasQuiesce<P, std::void_t<decltype(std::declval<const P&>().forcingMoves((int*)nullptr)),
                                  decltype(std::declval<const P&>().mustDefend())>> : std::true_type {};
-template <class P, class = void> struct HasNull : std::false_type {};
-template <class P>
-struct HasNull<P, std::void_t<decltype(std::declval<P&>().makeNull()), decltype(std::declval<P&>().undoNull()),
-                              decltype(std::declval<const P&>().canNull())>> : std::true_type {};
 } // namespace detail
 
 // ───────────────────────── 전치표 ─────────────────────────
@@ -183,13 +179,6 @@ struct Config {
     int  razorMargin   = 200;
     int  tacW          = 0;     // 정렬에 전술 등급 × tacW 를 더함 (0 = 끔)
     int  histDiv       = 1;     // 정렬에서 히스토리를 이 값으로 나눔 (1 = 그대로)
-    int  seDepth       = 0;     // 특이 수 연장: d ≥ seDepth 에서 TT 수 말고 다른 수가 모두 TT점수 - seMargin·d 아래면 TT 수 연장 (0 = 끔)
-    int  seMargin      = 16;
-    int  seCost        = 0;     //   특이 수가 소모할 깊이
-    bool seMultiCut    = false; //   대안 수도 beta 를 넘으면 바로 반환
-    int  nmpDepth      = 0;     // 널 수 가지치기: 비PV·위협 없음·d ≥ nmpDepth·정적평가 ≥ beta 에서 패스 후 d-R 탐색이 beta 이상이면 컷 (0 = 끔)
-    int  nmpR          = 3;     //   R = nmpR + d/nmpDiv 수
-    int  nmpDiv        = 4;
     int  mcpBase       = 0;     // 수 개수 가지치기: (mcpBase + d^1.3)/(개선 없으면 2) 번째 이후 비전술 수 생략 (0 = 끔)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
@@ -228,7 +217,6 @@ public:
         for (auto& sd : counter_) for (int& x : sd) x = NO_MOVE;
         std::memset(cont_, 0, sizeof(cont_));
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
-        for (int& x : excluded_) x = NO_MOVE;
     }
 
     Result think(P& pos, const Limits& lim) {
@@ -240,7 +228,6 @@ public:
         tt.newSearch();
         buildLmr();
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
-        for (int& x : excluded_) x = NO_MOVE;
         for (auto& side : history_) for (int& h : side) h /= 2;   // 히스토리 에이징
 
         Result res;
@@ -318,7 +305,6 @@ private:
     // negamax PVS, fail-soft. 반환값은 둘 차례 기준.
     int search(P& pos, int alpha, int beta, int depth, int ply, bool cutNode = false) {
         constexpr bool scored = detail::HasScored<P>::value;
-        const int excluded = excluded_[ply];
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
         ++nodes_;
@@ -348,11 +334,11 @@ private:
 
         // ── 전치표 조회 ──
         const uint64_t key = pos.key();
-        int ttMove = NO_MOVE, ttScore = 0, ttDepth = -1, ttBound = BOUND_NONE;
+        int ttMove = NO_MOVE;
         if (cfg.useTT) {
             if (const TTEntry* e = tt.probe(key)) {
-                ttMove = e->move; ttScore = scoreFromTT(e->score, ply); ttDepth = e->depth; ttBound = e->bound;
-                if (!root && !pvNode && excluded == NO_MOVE && e->depth >= depth) {
+                ttMove = e->move;
+                if (!root && !pvNode && e->depth >= depth) {
                     const int s = scoreFromTT(e->score, ply);
                     if (e->bound == BOUND_EXACT ||
                         (e->bound == BOUND_LOWER && s >= beta) ||
@@ -371,25 +357,14 @@ private:
             evalStack_[ply] = se;
             if (cfg.useImproving && ply >= 2) improving = se > evalStack_[ply - 2];
             const int dPly = depth / ONE_PLY;
-            if (cfg.rfpDepth > 0 && !pvNode && !root && excluded == NO_MOVE && pos.quietNode() && dPly <= cfg.rfpDepth &&
+            if (cfg.rfpDepth > 0 && !pvNode && !root && pos.quietNode() && dPly <= cfg.rfpDepth &&
                 std::abs(beta) < MATE_BOUND && se - cfg.rfpMargin * std::max(dPly - (improving ? 1 : 0), 0) >= beta)
                 return se;
             if constexpr (detail::HasQuiesce<P>::value)
-                if (cfg.razorDepth > 0 && !pvNode && !root && excluded == NO_MOVE && pos.quietNode() && dPly <= cfg.razorDepth &&
+                if (cfg.razorDepth > 0 && !pvNode && !root && pos.quietNode() && dPly <= cfg.razorDepth &&
                     std::abs(alpha) < MATE_BOUND && se + cfg.razorMargin * std::max(dPly, 1) < alpha) {
                     const int v = qsearch(pos, alpha, alpha + 1, ply, 0);
                     if (v <= alpha) return v;
-                }
-            if constexpr (detail::HasNull<P>::value)
-                if (cfg.nmpDepth > 0 && !pvNode && !root && excluded == NO_MOVE && dPly >= cfg.nmpDepth &&
-                    pos.quietNode() && pos.canNull() && se >= beta && std::abs(beta) < MATE_BOUND) {
-                    const int R = (cfg.nmpR + dPly / cfg.nmpDiv) * ONE_PLY;
-                    pos.makeNull();
-                    moveStack_[ply] = NO_MOVE;
-                    const int v = -search(pos, -beta, -beta + 1, depth - ONE_PLY - R, ply + 1, !cutNode);
-                    pos.undoNull();
-                    if (stopped_) return 0;
-                    if (v >= beta) return v >= MATE_BOUND ? beta : v;
                 }
         }
 
@@ -438,21 +413,6 @@ private:
                      : std::min(base, (1 << 28));
         }
 
-        // ── 특이 수 판정: TT 수를 빼고 낮춘 창으로 얕게 탐색 ──
-        bool singular = false;
-        if constexpr (scored)
-            if (cfg.seDepth > 0 && !root && excluded == NO_MOVE && ttMove != NO_MOVE && n > 1 &&
-                depth >= cfg.seDepth * ONE_PLY && ttDepth >= depth - 3 * ONE_PLY &&
-                (ttBound == BOUND_LOWER || ttBound == BOUND_EXACT) && std::abs(ttScore) < MATE_BOUND) {
-                const int sBeta = ttScore - cfg.seMargin * depth / ONE_PLY;
-                excluded_[ply] = ttMove;
-                const int v = search(pos, sBeta - 1, sBeta, (depth - ONE_PLY) / 2, ply, cutNode);
-                excluded_[ply] = NO_MOVE;
-                if (stopped_) return 0;
-                if (v < sBeta) singular = true;
-                else if (cfg.seMultiCut && sBeta >= beta) return sBeta;
-            }
-
         const int alpha0 = alpha;
         int best = -INF, bestMove = NO_MOVE;
 
@@ -471,13 +431,11 @@ private:
             }
             for (int j = bi; j > i; --j) { moves[j] = moves[j - 1]; order[j] = order[j - 1]; }
             moves[i] = m; order[i] = mOrder;
-            if (m == excluded) continue;
 
             // 이 수가 소모할 깊이와 가지치기 (TT 수·킬러·전술 수는 제외)
             int extra = 0, cost = ONE_PLY;
             if constexpr (scored) {
                 if (n == 1) cost = cfg.forcedCost;
-                else if (singular && m == ttMove) cost = std::min(cfg.seCost, (mTac & 128) ? cfg.tacCost : ONE_PLY);
                 else if (mTac & 128) cost = (cfg.tacHiMin && (mTac & 127) >= cfg.tacHiMin) ? cfg.tacHiCost : cfg.tacCost;
                 else if (mOrder < (1 << 29) - 1) {
                     if (!root) {
@@ -547,7 +505,6 @@ private:
             }
         }
 
-        if (excluded != NO_MOVE) return best == -INF ? alpha0 : best;
         if (cfg.useTT) {
             const Bound b = best >= beta ? BOUND_LOWER : best > alpha0 ? BOUND_EXACT : BOUND_UPPER;
             tt.store(key, scoreToTT(best, ply), bestMove, std::min(depth, 127), b);
@@ -638,7 +595,6 @@ private:
     int               rootBest_ = NO_MOVE;
 
     int killers_[MAX_PLY][2];
-    int excluded_[MAX_PLY + 2];             // 특이 수 판정 중 제외할 수 (없으면 NO_MOVE)
     int history_[2][P::NUM_MOVES];
     int counter_[2][P::NUM_MOVES];          // [둘 차례][상대 직전 수] → 반박수
     int cont_[P::NUM_MOVES][P::NUM_MOVES];  // 연속 히스토리 [상대 직전 수][이 수]
