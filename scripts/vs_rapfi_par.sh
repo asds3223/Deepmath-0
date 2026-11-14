@@ -12,5 +12,5 @@ cd "$ROOT/data/net"
 for i in $(seq 0 $((JOBS-1))); do
   "${ORACLE:-$ROOT/build/oracle/oracle}" match --model "$MODEL" --data "$OPEN" --ours search --nodes "${ONODES:-10000}" --rapfi search \
       --rapfi-nodes "${RNODES:-8000}" ${RCLS:+--rapfi-classical 1} --pairs "$PAIRS" --offset $((i*5000+17)) --stride 3 "$@" 2>/dev/null | grep RESULT &
-done | awk -v n="$name" '{split($2,a,"=");split($3,d,"=");split($4,b,"=");w+=a[2];dr+=d[2];l+=b[2]}
+done | tee /dev/stderr | awk -v n="$name" '{split($2,a,"=");split($3,d,"=");split($4,b,"=");w+=a[2];dr+=d[2];l+=b[2]}
   END{t=w+dr+l; s=(w+dr/2)/t; printf "%-36s ours %d-%d-%d  %.1f%% (±%.1f)\n",n,w,dr,l,100*s,100*1.96*sqrt(s*(1-s)/t)}'
