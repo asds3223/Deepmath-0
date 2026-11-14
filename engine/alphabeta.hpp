@@ -140,7 +140,10 @@ struct Config {
     int  rpsPerLogit   = 4;     // 실현 확률 깊이: 정책 1위와 로짓 1 차이당 추가 소모 (ONE_PLY 의 1/4 단위) — 6→4: +13, +30 Elo (3, 5 는 +5)
     int  rpsMaxExtra   = 8;
     int  lmrDiv100     = 100;   // 로그형 늦은 수 감축 ln(d)·ln(i)·100/lmrDiv100 수 (0 = 끔), 실현 확률 감축에 더함
-    int  tacCost       = 2;     // 전술 수(4·쌍삼 이상 만들기/막기)가 소모하는 깊이 — 반 수 연장 (A/B: +19, +22 Elo)
+    int  tacCost       = 2;     // 공격 수(자기 쌍삼·4 이상 만들기)가 소모하는 깊이 — 반 수 연장 (A/B: +19, +22 Elo)
+    int  defCost       = 2;     // 방어 수(상대 쌍삼·4 이상 자리를 막기만)가 소모하는 깊이
+    bool defPrune      = false; // 조용한 노드의 방어 수도 가지치기 대상 (공격 수만 면제)
+    int  atkOrder      = 0;     // 조용한 노드에서 공격 수 정렬 가산 (정책 로짓 단위 ×256)
     int  forcedCost    = 0;     // 수가 하나뿐일 때(강제 응수) 소모 깊이 — 0 = 완전 연장 (A/B: 2→0 +23 Elo)
     bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
     bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
@@ -383,6 +386,8 @@ private:
         ++interior_;
 
         // 노드 단위 가지치기 조건
+        bool quiet = true;                               // 상대 위협 없음 (공격/방어 비대칭은 여기서만)
+        if constexpr (scored) quiet = pos.quietNode();
         bool gate = false;                               // 정적 문턱
         int quietSearched = 0, keepLimit = 0;            // 남은 깊이별 조용한 수 예산
         if constexpr (scored) {
@@ -399,7 +404,10 @@ private:
         for (int i = 0; i < n; ++i) {
             const int m = moves[i];
             int base = history_[side][m];
-            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
+            if constexpr (scored) {
+                base += cfg.orderPolicyW * pscore[i] / 4;
+                if (cfg.atkOrder && quiet && (tac[i] & 64)) base += cfg.atkOrder;
+            }
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
@@ -430,7 +438,7 @@ private:
             int extra = 0, cost = ONE_PLY;
             if constexpr (scored) {
                 if (n == 1) cost = cfg.forcedCost;
-                else if (mTac & 128) cost = cfg.tacCost;
+                else if ((mTac & 128) && ((mTac & 64) || !cfg.defPrune || !quiet)) cost = (mTac & 64) ? cfg.tacCost : cfg.defCost;
                 else if (mOrder < (1 << 29) - 1) {
                     if (!root) {
                         if (cfg.usePolicyCut && i >= cfg.cutMinKeep && (smax - mScore) / 256 > cfg.cutGap) continue;

@@ -96,7 +96,8 @@ constexpr int TACTICAL_CLASS = C_DOUBLE3;
 
 // generateScored 의 tactical 바이트 = TAC_FLAG(전술 수 여부) | 전술 등급(0..127, 수 정렬용)
 //   전술 등급 = 공격 등급·2 + 수비 등급 : 이 칸이 만드는 자기 위협과 막는 상대 위협의 세기
-constexpr uint8_t TAC_FLAG = 128;
+constexpr uint8_t TAC_FLAG = 128;   // 전술 수 (공격이든 방어든)
+constexpr uint8_t TAC_ATK  = 64;    // 그중 공격 수: 자기 쌍삼 이상을 만든다 (아니면 상대 위협을 막기만 하는 방어 수)
 inline int classGrade(int c) {
     //                              NONE TWO O2 D2 T3 T3+ O3 O3+ D3 F4 F4+ F43 WIN4 FIVE
     static const int g[CLASS_NB] = {0,   1,  2, 3, 2, 3,  5, 6,  8, 6, 7,  10, 12,  15};
@@ -194,18 +195,18 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
     const int s = side - 1, o = 2 - side;
     const int* cells = feat::boardCells();
     if (clsCnt[s][C_FIVE]) {
-        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == C_FIVE) { out[0] = m; score[0] = 0; tactical[0] = TAC_FLAG | 45; return 1; }
+        for (int m = 0; m < NMOVES; ++m) if (cell[cells[m]] == EMPTY && cls[s][cells[m]] == C_FIVE) { out[0] = m; score[0] = 0; tactical[0] = TAC_FLAG | TAC_ATK | 45; return 1; }
     }
     int n = 0;
     if (clsCnt[o][C_FIVE]) {
         for (int m = 0; m < NMOVES; ++m)
-            if (cell[cells[m]] == EMPTY && cls[o][cells[m]] == C_FIVE) { out[n] = m; score[n] = 0; tactical[n] = uint8_t(TAC_FLAG | (classGrade(cls[s][cells[m]]) * 2 + 15)); ++n; }
+            if (cell[cells[m]] == EMPTY && cls[o][cells[m]] == C_FIVE) { out[n] = m; score[n] = 0; tactical[n] = uint8_t(TAC_FLAG | (cls[s][cells[m]] >= TACTICAL_CLASS ? TAC_ATK : 0) | (classGrade(cls[s][cells[m]]) * 2 + 15)); ++n; }
         return n;
     }
     int defs[NMOVES], nd = 0;
     if (oppThreat()) nd = defenseMoves(defs);
     if (nd) {
-        for (int i = 0; i < nd; ++i) { const int c = cells[defs[i]]; out[i] = defs[i]; tactical[i] = uint8_t(TAC_FLAG | (classGrade(cls[s][c]) * 2 + classGrade(cls[o][c]))); }
+        for (int i = 0; i < nd; ++i) { const int c = cells[defs[i]]; out[i] = defs[i]; tactical[i] = uint8_t(TAC_FLAG | (cls[s][c] >= TACTICAL_CLASS ? TAC_ATK : 0) | (classGrade(cls[s][c]) * 2 + classGrade(cls[o][c]))); }
         n = nd;
     } else {
         for (int w = 0; w < 4; ++w)
@@ -213,7 +214,7 @@ inline int Board::generateScored(int* out, int* score, uint8_t* tactical) const 
                 const int m = w * 64 + __builtin_ctzll(bits);
                 const int c = cells[m];
                 out[n] = m;
-                tactical[n] = uint8_t(((cls[s][c] >= TACTICAL_CLASS || cls[o][c] >= TACTICAL_CLASS) ? TAC_FLAG : 0) |
+                tactical[n] = uint8_t((cls[s][c] >= TACTICAL_CLASS ? TAC_FLAG | TAC_ATK : cls[o][c] >= TACTICAL_CLASS ? TAC_FLAG : 0) |
                                       (classGrade(cls[s][c]) * 2 + classGrade(cls[o][c])));
                 ++n;
             }
