@@ -174,17 +174,10 @@ struct Config {
     int  gateMargin    = 150;
     int  rfpDepth      = 5;     // 역방향 정적 가지치기: 비PV·위협 없음·d ≤ rfpDepth 에서
     int  rfpMargin     = 60;    //   정적평가 - rfpMargin·(d - improving) ≥ beta 면 즉시 반환 (0 = 끔)
-    // 실험 중 (기본 끔)
-    int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
-    int  contW         = 0;     // 연속 히스토리(상대 직전 수 → 이 수) 정렬 가중 (0 = 끔)
-    bool histMalus     = false; // 컷을 못 낸 조용한 수에 히스토리 감점
-    int  cutNodeRed    = 0;     // 컷 예상 노드(PVS 널 윈도우 자식)의 늦은 수 추가 감축 (ONE_PLY 단위의 1/4, 0 = 끔)
-    int  qThreatPen    = 0;     // 정지 탐색: 상대 열린 3 류 위협이 있는데 기준값을 쓰면 이만큼 깎는다 (0 = 끔)
     int  razorDepth    = 2;     // 레이저링 (A/B 2,000판: d2 ≈ +15 Elo): 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
     int  razorMargin   = 200;
-    int  tacW          = 0;     // 정렬에 전술 등급 × tacW 를 더함 (0 = 끔)
-    int  histDiv       = 1;     // 정렬에서 히스토리를 이 값으로 나눔 (1 = 그대로)
-    int  mcpBase       = 0;     // 수 개수 가지치기: (mcpBase + d^1.3)/(개선 없으면 2) 번째 이후 비전술 수 생략 (0 = 끔)
+    // 실험 중
+    int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
@@ -235,7 +228,6 @@ public:
     void clearHeuristics() {
         std::memset(history_, 0, sizeof(history_));
         for (auto& sd : counter_) for (int& x : sd) x = NO_MOVE;
-        std::memset(cont_, 0, sizeof(cont_));
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
     }
 
@@ -333,7 +325,7 @@ private:
     }
 
     // negamax PVS, fail-soft. 반환값은 둘 차례 기준.
-    int search(P& pos, int alpha, int beta, int depth, int ply, bool cutNode = false) {
+    int search(P& pos, int alpha, int beta, int depth, int ply) {
         constexpr bool scored = detail::HasScored<P>::value;
         pvLen_[ply] = 0;
         if (checkStop()) return 0;
@@ -424,18 +416,13 @@ private:
         }
         const int prevMove    = ply > 0 ? moveStack_[ply - 1] : NO_MOVE;
         const int counterMove = (cfg.useCounter && prevMove >= 0) ? counter_[ply & 1][prevMove] : NO_MOVE;
-        int mcLimit = P::NUM_MOVES + 1;
-        if (cfg.mcpBase > 0)
-            mcLimit = std::max(1, int((cfg.mcpBase + std::pow(double(depth) / ONE_PLY, 1.3)) / (improving ? 1 : 2)));
-        int quietTried[P::NUM_MOVES], nQuietTried = 0;
 
         // ── 정렬 점수 ──
         const int side = ply & 1;
         for (int i = 0; i < n; ++i) {
             const int m = moves[i];
-            int base = history_[side][m] / cfg.histDiv;
-            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4 + cfg.tacW * (tac[i] & 127);
-            if (cfg.contW && prevMove >= 0) base += cfg.contW * cont_[prevMove][m] / 4;
+            int base = history_[side][m];
+            if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
@@ -469,7 +456,6 @@ private:
                 else if (mTac & 128) cost = (cfg.tacHiMin && (mTac & 127) >= cfg.tacHiMin) ? cfg.tacHiCost : cfg.tacCost;
                 else if (mOrder < (1 << 29) - 1) {
                     if (!root) {
-                        if (i >= mcLimit && best > -MATE_BOUND) continue;
                         if (cfg.usePolicyCut && i >= cfg.cutMinKeep && (smax - mScore) / 256 > cfg.cutGap) continue;
                         if (i > 0 && gate) continue;
                         if (cfg.keepBase > 0 && quietSearched >= keepLimit) continue;
@@ -480,7 +466,6 @@ private:
                         int r = lmrTab_[std::min(depth / ONE_PLY, 63)][std::min(i, 63)];
                         if (pvNode) r = r * 2 / 3;
                         if (!improving) r += ONE_PLY / 2;
-                        if (cutNode) r += cfg.cutNodeRed;
                         extra = std::min(extra + r, std::max(depth - ONE_PLY, 0));
                     }
                 }
@@ -489,18 +474,16 @@ private:
             pos.make(m);
             ++searched_;
             moveStack_[ply] = m;
-            if (mOrder < (1 << 29) - 2) quietTried[nQuietTried++] = m;
             int s;
-            const bool childCut0 = !pvNode && !cutNode;        // 첫 자식: PV 면 PV, 아니면 노드 종류가 뒤집힌다
             if (i == 0) {
-                s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1, childCut0);
-                if (extra && s > alpha) s = -search(pos, -beta, -alpha, depth - cost, ply + 1, childCut0);
+                s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
+                if (extra && s > alpha) s = -search(pos, -beta, -alpha, depth - cost, ply + 1);
             } else {
-                s = -search(pos, -alpha - 1, -alpha, depth - cost - extra, ply + 1, true);  // 널 윈도우 = 컷 예상
+                s = -search(pos, -alpha - 1, -alpha, depth - cost - extra, ply + 1);
                 if (extra && s > alpha)
-                    s = -search(pos, -alpha - 1, -alpha, depth - cost, ply + 1, !cutNode);  // 감축 없이 재탐색
+                    s = -search(pos, -alpha - 1, -alpha, depth - cost, ply + 1);      // 감축 없이 재탐색
                 if (s > alpha && s < beta)
-                    s = -search(pos, -beta, -alpha, depth - cost, ply + 1, false);          // 풀 윈도우 재탐색
+                    s = -search(pos, -beta, -alpha, depth - cost, ply + 1);          // 풀 윈도우 재탐색
             }
             pos.undo(m);
             if (stopped_) return 0;
@@ -521,14 +504,6 @@ private:
                         int& h = history_[side][m];
                         h += bonus;
                         if (h > (1 << 28)) for (auto& sd : history_) for (int& x : sd) x /= 2;
-                        if (prevMove >= 0) cont_[prevMove][m] = std::min(cont_[prevMove][m] + bonus * 32, 1 << 24);
-                        if (cfg.histMalus)
-                            for (int t = 0; t < nQuietTried; ++t) {
-                                const int q = quietTried[t];
-                                if (q == m) continue;
-                                history_[side][q] = std::max(history_[side][q] - bonus, -(1 << 20));
-                                if (prevMove >= 0) cont_[prevMove][q] = std::max(cont_[prevMove][q] - bonus * 32, -(1 << 24));
-                            }
                         break;
                     }
                 }
@@ -585,8 +560,6 @@ private:
             if (n == 0) return -(MATE - ply - 3);
         } else {
             int stand = pos.evaluate();
-            if constexpr (detail::HasScored<P>::value)
-                if (cfg.qThreatPen && !pos.quietNode()) stand -= cfg.qThreatPen;   // 막지 않은 상대 위협
             if (stand >= beta || qply >= cfg.qMaxPly) return stand;
             if (stand > alpha) alpha = stand;
             best = stand;
@@ -627,7 +600,6 @@ private:
     int killers_[MAX_PLY][2];
     int history_[2][P::NUM_MOVES];
     int counter_[2][P::NUM_MOVES];          // [둘 차례][상대 직전 수] → 반박수
-    int cont_[P::NUM_MOVES][P::NUM_MOVES];  // 연속 히스토리 [상대 직전 수][이 수]
     int moveStack_[MAX_PLY + 2];            // ply 에서 둔 수
     int evalStack_[MAX_PLY + 2];            // ply 의 정적평가 (improving)
     int lmrTab_[64][64];
