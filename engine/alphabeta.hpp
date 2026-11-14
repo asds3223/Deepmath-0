@@ -136,8 +136,8 @@ inline int scoreFromTT(int s, int ply) { return s >= MATE_BOUND ? s - ply : s <=
 struct Limits {
     int      maxDepth = MAX_PLY - 1;
     int64_t  timeMs   = -1;     // <0: 시간 제한 없음 (하드 리밋)
-    int64_t  softMs   = -1;     // ≥0: 목표 시간. 반복 사이에 최선수 안정성·점수 하락으로 늘리고 줄인다 (<0: timeMs·softTimePct 고정 규칙)
     uint64_t maxNodes = 0;      // 0: 노드 제한 없음
+    int64_t  softMs   = -1;     // ≥0: 목표 시간. 반복 사이에 최선수 안정성·점수 하락으로 늘리고 줄인다 (<0: timeMs·softTimePct 고정 규칙)
 };
 
 // 기본값은 15x15 프리스타일 튜닝 결과 (1,000판 A/B 기준). 이름은 engine/params.hpp 의 키와 같다.
