@@ -74,40 +74,56 @@ struct TTEntry {            // 16 bytes
 
 class TransTable {
 public:
-    explicit TransTable(size_t mb = 64) { resize(mb); }
+    explicit TransTable(size_t mb = 64, int ways = 1) : ways_(ways) { resize(mb); }
 
+    // ways: 한 슬롯(버킷)의 엔트리 수. 1 = 직접 사상, 4 = 버킷 안에서 깊이·세대로 교체 대상 선택
+    void setWays(int w) { if (w != ways_) { ways_ = w; resize(mb_); } }
     void resize(size_t mb) {
+        mb_ = mb;
         size_t n = 1;
-        while (n * 2 * sizeof(TTEntry) <= mb * 1024 * 1024) n *= 2;
-        table_.assign(n, TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0});
+        while (n * 2 * sizeof(TTEntry) * ways_ <= mb * 1024 * 1024) n *= 2;
+        table_.assign(n * ways_, TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0});
         mask_ = n - 1;
     }
     void clear() { std::fill(table_.begin(), table_.end(), TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0}); }
     void newSearch() { ++gen_; }
 
     const TTEntry* probe(uint64_t key) const {
-        const TTEntry& e = table_[key & mask_];
-        return (e.bound != BOUND_NONE && e.key == key) ? &e : nullptr;
+        const TTEntry* b = &table_[(key & mask_) * ways_];
+        for (int i = 0; i < ways_; ++i)
+            if (b[i].bound != BOUND_NONE && b[i].key == key) return &b[i];
+        return nullptr;
     }
 
     void store(uint64_t key, int score, int move, int depth, Bound bound) {
-        TTEntry& e = table_[key & mask_];
-        if (e.bound != BOUND_NONE && e.key == key) {
-            if (move == NO_MOVE) move = e.move;                // 기존 최선수 보존
-            if (bound != BOUND_EXACT && depth + 2 < e.depth) { // 훨씬 깊은 기존 정보는 유지
-                e.move = int16_t(move); e.gen = gen_;
+        TTEntry* b = &table_[(key & mask_) * ways_];
+        TTEntry* e = nullptr;
+        for (int i = 0; i < ways_; ++i) if (b[i].bound != BOUND_NONE && b[i].key == key) { e = &b[i]; break; }
+        if (e) {
+            if (move == NO_MOVE) move = e->move;               // 기존 최선수 보존
+            if (bound != BOUND_EXACT && depth + 2 < e->depth) { // 훨씬 깊은 기존 정보는 유지
+                e->move = int16_t(move); e->gen = gen_;
                 return;
             }
-        } else if (e.bound != BOUND_NONE && e.gen == gen_ && e.depth > depth + 2) {
-            return;                                            // 같은 세대의 깊은 엔트리 우선
+        } else if (ways_ == 1) {
+            e = b;
+            if (e->bound != BOUND_NONE && e->gen == gen_ && e->depth > depth + 2) return;   // 같은 세대의 깊은 엔트리 우선
+        } else {
+            // 교체 대상: 빈 칸 > (깊이 − 8·세대 차이) 가 가장 작은 엔트리
+            int bestV = 1 << 30;
+            for (int i = 0; i < ways_; ++i) {
+                const int v = b[i].bound == BOUND_NONE ? -(1 << 29) : b[i].depth - 8 * uint8_t(gen_ - b[i].gen);
+                if (v < bestV) { bestV = v; e = &b[i]; }
+            }
         }
-        e.key = key; e.score = int16_t(score); e.move = int16_t(move);
-        e.depth = int8_t(depth); e.bound = bound; e.gen = gen_;
+        e->key = key; e->score = int16_t(score); e->move = int16_t(move);
+        e->depth = int8_t(depth); e->bound = bound; e->gen = gen_;
     }
 
 private:
     std::vector<TTEntry> table_;
-    size_t  mask_ = 0;
+    size_t  mask_ = 0, mb_ = 0;
+    int     ways_ = 1;
     uint8_t gen_  = 0;
 };
 
@@ -136,7 +152,7 @@ struct Config {
     int  rpsPerLogit   = 6;     // 실현 확률 깊이: 정책 1위와 로짓 1 차이당 추가 소모 (ONE_PLY 의 1/4 단위)
     int  rpsMaxExtra   = 8;
     int  lmrDiv100     = 100;   // 로그형 늦은 수 감축 ln(d)·ln(i)·100/lmrDiv100 수 (0 = 끔), 실현 확률 감축에 더함
-    int  forcedCost    = 2;     // 수가 하나뿐일 때 소모 깊이 (ONE_PLY 보다 작으면 연장)
+    int  forcedCost    = 0;     // 수가 하나뿐일 때(강제 응수) 소모 깊이 — 0 = 완전 연장 (A/B: 2→0 +23 Elo)
     bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
     bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
     // 가지치기 (비전술 수만)
@@ -149,6 +165,13 @@ struct Config {
     int  gateMargin    = 150;
     int  rfpDepth      = 5;     // 역방향 정적 가지치기: 비PV·위협 없음·d ≤ rfpDepth 에서
     int  rfpMargin     = 60;    //   정적평가 - rfpMargin·(d - improving) ≥ beta 면 즉시 반환 (0 = 끔)
+    // 실험 중 (기본 끔)
+    int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
+    int  contW         = 0;     // 연속 히스토리(상대 직전 수 → 이 수) 정렬 가중 (0 = 끔)
+    bool histMalus     = false; // 컷을 못 낸 조용한 수에 히스토리 감점
+    int  razorDepth    = 0;     // 레이저링: 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
+    int  razorMargin   = 200;
+    int  mcpBase       = 0;     // 수 개수 가지치기: (mcpBase + d^1.3)/(개선 없으면 2) 번째 이후 비전술 수 생략 (0 = 끔)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
@@ -183,6 +206,7 @@ public:
     void clearHeuristics() {
         std::memset(history_, 0, sizeof(history_));
         for (auto& sd : counter_) for (int& x : sd) x = NO_MOVE;
+        std::memset(cont_, 0, sizeof(cont_));
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
     }
 
@@ -191,6 +215,7 @@ public:
         interior_ = searched_ = cutFirst_ = cutTotal_ = qnodes_ = 0;
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
+        tt.setWays(std::max(1, cfg.ttWays));
         tt.newSearch();
         buildLmr();
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
@@ -326,6 +351,12 @@ private:
             if (cfg.rfpDepth > 0 && !pvNode && !root && pos.quietNode() && dPly <= cfg.rfpDepth &&
                 std::abs(beta) < MATE_BOUND && se - cfg.rfpMargin * std::max(dPly - (improving ? 1 : 0), 0) >= beta)
                 return se;
+            if constexpr (detail::HasQuiesce<P>::value)
+                if (cfg.razorDepth > 0 && !pvNode && !root && pos.quietNode() && dPly <= cfg.razorDepth &&
+                    std::abs(alpha) < MATE_BOUND && se + cfg.razorMargin * std::max(dPly, 1) < alpha) {
+                    const int v = qsearch(pos, alpha, alpha + 1, ply, 0);
+                    if (v <= alpha) return v;
+                }
         }
 
         // ── 수 생성 ──
@@ -354,6 +385,10 @@ private:
         }
         const int prevMove    = ply > 0 ? moveStack_[ply - 1] : NO_MOVE;
         const int counterMove = (cfg.useCounter && prevMove >= 0) ? counter_[ply & 1][prevMove] : NO_MOVE;
+        int mcLimit = P::NUM_MOVES + 1;
+        if (cfg.mcpBase > 0)
+            mcLimit = std::max(1, int((cfg.mcpBase + std::pow(double(depth) / ONE_PLY, 1.3)) / (improving ? 1 : 2)));
+        int quietTried[P::NUM_MOVES], nQuietTried = 0;
 
         // ── 정렬 점수 ──
         const int side = ply & 1;
@@ -361,6 +396,7 @@ private:
             const int m = moves[i];
             int base = history_[side][m];
             if constexpr (scored) base += cfg.orderPolicyW * pscore[i] / 4;
+            if (cfg.contW && prevMove >= 0) base += cfg.contW * cont_[prevMove][m] / 4;
             order[i] = m == ttMove            ? (1 << 30)
                      : m == killers_[ply][0]  ? (1 << 29)
                      : m == killers_[ply][1]  ? (1 << 29) - 1
@@ -391,6 +427,7 @@ private:
                 if (n == 1) cost = cfg.forcedCost;
                 else if (!mTac && mOrder < (1 << 29) - 1) {
                     if (!root) {
+                        if (i >= mcLimit && best > -MATE_BOUND) continue;
                         if (cfg.usePolicyCut && i >= cfg.cutMinKeep && (smax - mScore) / 256 > cfg.cutGap) continue;
                         if (i > 0 && gate) continue;
                         if (cfg.keepBase > 0 && quietSearched >= keepLimit) continue;
@@ -409,6 +446,7 @@ private:
             pos.make(m);
             ++searched_;
             moveStack_[ply] = m;
+            if (mOrder < (1 << 29) - 2) quietTried[nQuietTried++] = m;
             int s;
             if (i == 0) {
                 s = -search(pos, -beta, -alpha, depth - cost - extra, ply + 1);
@@ -435,9 +473,18 @@ private:
                         ++cutTotal_; cutFirst_ += (i == 0);
                         if (cfg.useCounter && prevMove >= 0) counter_[ply & 1][prevMove] = m;
                         if (killers_[ply][0] != m) { killers_[ply][1] = killers_[ply][0]; killers_[ply][0] = m; }
+                        const int bonus = (depth * depth) / (ONE_PLY * ONE_PLY) + 1;
                         int& h = history_[side][m];
-                        h += (depth * depth) / (ONE_PLY * ONE_PLY) + 1;
+                        h += bonus;
                         if (h > (1 << 28)) for (auto& sd : history_) for (int& x : sd) x /= 2;
+                        if (prevMove >= 0) cont_[prevMove][m] = std::min(cont_[prevMove][m] + bonus * 32, 1 << 24);
+                        if (cfg.histMalus)
+                            for (int t = 0; t < nQuietTried; ++t) {
+                                const int q = quietTried[t];
+                                if (q == m) continue;
+                                history_[side][q] = std::max(history_[side][q] - bonus, -(1 << 20));
+                                if (prevMove >= 0) cont_[prevMove][q] = std::max(cont_[prevMove][q] - bonus * 32, -(1 << 24));
+                            }
                         break;
                     }
                 }
@@ -508,6 +555,7 @@ private:
     int killers_[MAX_PLY][2];
     int history_[2][P::NUM_MOVES];
     int counter_[2][P::NUM_MOVES];          // [둘 차례][상대 직전 수] → 반박수
+    int cont_[P::NUM_MOVES][P::NUM_MOVES];  // 연속 히스토리 [상대 직전 수][이 수]
     int moveStack_[MAX_PLY + 2];            // ply 에서 둔 수
     int evalStack_[MAX_PLY + 2];            // ply 의 정적평가 (improving)
     int lmrTab_[64][64];

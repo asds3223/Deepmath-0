@@ -29,6 +29,9 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"gateDepth", &Config::gateDepth},            {"gateMargin", &Config::gateMargin},
         {"rfpDepth", &Config::rfpDepth},              {"rfpMargin", &Config::rfpMargin},
         {"useQuiesce", nullptr, &Config::useQuiesce}, {"qMaxPly", &Config::qMaxPly},
+        {"ttWays", &Config::ttWays},                  {"contW", &Config::contW},
+        {"histMalus", nullptr, &Config::histMalus},   {"razorDepth", &Config::razorDepth},
+        {"razorMargin", &Config::razorMargin},        {"mcpBase", &Config::mcpBase},
     };
     return d;
 }
