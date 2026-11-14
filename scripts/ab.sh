@@ -11,6 +11,6 @@ name=$1; ms=$2; A=${3:-}; B=${4:-}
 MA=${MA:-$ROOT/models/c3.dce}; MB=${MB:-$ROOT/models/c3.dce}; OPEN=${OPEN:-$ROOT/data/r1_val.bin}
 JOBS=${JOBS:-4}; PAIRS=${PAIRS:-125}; SUITE=${SUITE:---band 0.05 --ply-min 2 --ply-max 6}
 for i in $(seq 0 $((JOBS-1))); do
-  "$ROOT/build/match" --a "$MA" --b "$MB" --data "$OPEN" --pairs "$PAIRS" --ms "$ms" --offset $((i*5000+${OFFSET0:-17})) --stride 3 $SUITE $A $B &
+  "${MATCH:-$ROOT/build/match}" --a "$MA" --b "$MB" --data "$OPEN" --pairs "$PAIRS" --ms "$ms" --offset $((i*5000+${OFFSET0:-17})) --stride 3 $SUITE $A $B &
 done | awk -v n="$name" '/RESULT/{split($2,a,"=");split($3,d,"=");split($4,b,"=");w+=a[2];dr+=d[2];l+=b[2]}
   END{t=w+dr+l; s=(w+dr/2)/t; printf "%-36s A %d-%d-%d B  A %.1f%% (±%.1f)  ≈%+.0f Elo\n",n,w,dr,l,100*s,100*1.96*sqrt(s*(1-s)/t),-400*log(1/s-1)/log(10)}'
