@@ -192,6 +192,7 @@ struct Config {
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
+    bool qTT           = false; // 정지 탐색에서도 전치표 조회·저장 (수가 있는 노드만, 깊이 0 으로)
 };
 
 struct Result {
@@ -576,8 +577,20 @@ private:
         }
         if (ply >= MAX_PLY - 1) return pos.evaluate();
         int moves[P::NUM_MOVES], n, best;
+        const int alpha0 = alpha;
+        const bool useQTT = cfg.qTT && cfg.useTT;
+        auto probeQ = [&](int& out) {
+            if (const TTEntry* e = tt.probe(pos.key())) {
+                const int s = scoreFromTT(e->score, ply);
+                if (e->bound == BOUND_EXACT || (e->bound == BOUND_LOWER && s >= beta) || (e->bound == BOUND_UPPER && s <= alpha)) {
+                    out = s; return true;
+                }
+            }
+            return false;
+        };
         if (pos.mustDefend()) {
             if (qply >= cfg.qMaxPly) return pos.evaluate();
+            if (useQTT) { int s; if (probeQ(s)) return s; }
             n = pos.generate(moves);            // 막는 수만 나온다
             best = -INF;
             if (n == 0) return -(MATE - ply - 3);
@@ -589,6 +602,7 @@ private:
             if (stand > alpha) alpha = stand;
             best = stand;
             n = pos.forcingMoves(moves);
+            if (n && useQTT) { int s; if (probeQ(s)) return s; }
         }
         for (int i = 0; i < n; ++i) {
             pos.make(moves[i]);
@@ -606,6 +620,9 @@ private:
                 }
             }
         }
+        if (useQTT && n > 0)
+            tt.store(pos.key(), scoreToTT(best, ply), NO_MOVE, 0,
+                     best >= beta ? BOUND_LOWER : best > alpha0 ? BOUND_EXACT : BOUND_UPPER);
         return best;
     }
 
