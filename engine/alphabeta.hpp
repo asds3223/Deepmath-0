@@ -155,7 +155,7 @@ struct Config {
     int  orderPolicyW  = 4;     // 정렬 점수 = 히스토리 + orderPolicyW × 정책점수 / 4
     bool useCounter    = true;  // 상대 직전 수에 대한 반박수
     // 깊이 소모
-    int  rpsPerLogit   = 6;     // 실현 확률 깊이: 정책 1위와 로짓 1 차이당 추가 소모 (ONE_PLY 의 1/4 단위)
+    int  rpsPerLogit   = 4;     // 실현 확률 깊이: 정책 1위와 로짓 1 차이당 추가 소모 (ONE_PLY 의 1/4 단위) — 6→4: +13, +30 Elo (3, 5 는 +5)
     int  rpsMaxExtra   = 8;
     int  lmrDiv100     = 100;   // 로그형 늦은 수 감축 ln(d)·ln(i)·100/lmrDiv100 수 (0 = 끔), 실현 확률 감축에 더함
     int  tacCost       = 2;     // 전술 수(4·쌍삼 이상 만들기/막기)가 소모하는 깊이 — 반 수 연장 (A/B: +19, +22 Elo)
