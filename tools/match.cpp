@@ -1,5 +1,6 @@
 // match.cpp — 우리 엔진끼리 직접 대국 (각 수 고정 시간, 엔진당 싱글 스레드, 폰더링 없음)
 //   match --a A.dce --b B.dce --data openings.bin --pairs N --ms T [--offset k --stride s] [--a-키 값 ...] [--b-키 값 ...]
+//   대국 시계 모드: --match-ms M [--turn-ms T]  각자 대국당 M ms, 수당 최대 T ms (실전과 같은 planTime 배분). 시간 초과는 패
 // 오프닝: 데이터의 일반 대국 국면(ply 4..10, NNUE 승률 0.3..0.7). 같은 오프닝을 색을 바꿔 2판.
 // 양쪽 탐색 설정은 ab::Config 필드 이름에 a-/b- 를 붙여 따로 준다 (예: --a-rfpDepth 3).
 #include "../engine/params.hpp"
@@ -22,6 +23,8 @@ int main(int argc, char** argv) {
     if (opens.empty()) { std::fprintf(stderr, "no openings\n"); return 1; }
     const int pairs = int(a.num("pairs", 20)), offset = int(a.num("offset", 0)), stride = int(a.num("stride", 1));
     const int64_t ms = int64_t(a.num("ms", 100));
+    const int64_t matchMs = int64_t(a.num("match-ms", 0)), turnMs = int64_t(a.num("turn-ms", double(matchMs)));
+    int timeLossA = 0, timeLossB = 0;
     ab::Searcher<Board> sa(64), sb(64);
     ab::applyParams(sa.cfg, a.kv, "a-");
     ab::applyParams(sb.cfg, a.kv, "b-");
@@ -36,10 +39,20 @@ int main(int argc, char** argv) {
             const int colorA = g == 0 ? ba.side : opp(ba.side);
             sa.tt.clear(); sa.clearHeuristics(); sb.tt.clear(); sb.clearHeuristics();
             int result = 0;   // +1 A 승, -1 B 승
+            int64_t leftA = matchMs, leftB = matchMs;
             for (;;) {
                 const bool aMove = ba.side == colorA;
                 Board& bd = aMove ? ba : bb;
-                const ab::Result r = (aMove ? sa : sb).think(bd, ab::Limits{ab::MAX_PLY - 1, ms, 0});
+                ab::Limits lim{ab::MAX_PLY - 1, ms, 0};
+                if (matchMs > 0) ab::planTime((aMove ? sa : sb).cfg, turnMs, aMove ? leftA : leftB, lim);
+                const auto t0 = std::chrono::steady_clock::now();
+                const ab::Result r = (aMove ? sa : sb).think(bd, lim);
+                const int64_t used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+                if (matchMs > 0) {
+                    int64_t& left = aMove ? leftA : leftB;
+                    left -= used;
+                    if (left < 0) { result = aMove ? -1 : 1; ++(aMove ? timeLossA : timeLossB); break; }
+                }
                 (aMove ? na : nb) += double(r.nodes); (aMove ? ta : tb) += double(r.timeMs);
                 int m = r.bestMove;
                 if (m < 0 || !ba.isEmptyMove(m)) { for (int q = 0; q < NMOVES; ++q) if (ba.isEmptyMove(q)) { m = q; break; } }
@@ -58,6 +71,7 @@ int main(int argc, char** argv) {
     const int games = win + draw + loss;
     std::printf("RESULT A_win=%d draw=%d A_loss=%d games=%d | A nps=%.0f B nps=%.0f | avg moves/game=%.1f\n", win, draw, loss, games,
                 ta > 0 ? na / (ta / 1000) : 0, tb > 0 ? nb / (tb / 1000) : 0, double(movesTotal) / std::max(1, games));
-    std::printf("DIAG first-mover-wins=%d/%d pairs: A2=%d split=%d B2=%d\n", firstMoverWins, games, pairA2, pairSplit, pairB2);
+    std::printf("DIAG first-mover-wins=%d/%d pairs: A2=%d split=%d B2=%d time-losses A=%d B=%d\n", firstMoverWins, games, pairA2, pairSplit, pairB2,
+                timeLossA, timeLossB);
     return 0;
 }

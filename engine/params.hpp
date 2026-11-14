@@ -37,6 +37,8 @@ inline const std::vector<ParamDef>& paramDefs() {
         {"tacW", &Config::tacW},                      {"histDiv", &Config::histDiv},
         {"qThreatPen", &Config::qThreatPen},          {"cutNodeRed", &Config::cutNodeRed},
         {"qTT", nullptr, &Config::qTT},
+        {"tmDynamic", nullptr, &Config::tmDynamic},   {"tmDiv", &Config::tmDiv},
+        {"tmHardDiv", &Config::tmHardDiv},
     };
     return d;
 }

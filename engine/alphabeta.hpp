@@ -136,6 +136,7 @@ inline int scoreFromTT(int s, int ply) { return s >= MATE_BOUND ? s - ply : s <=
 struct Limits {
     int      maxDepth = MAX_PLY - 1;
     int64_t  timeMs   = -1;     // <0: 시간 제한 없음 (하드 리밋)
+    int64_t  softMs   = -1;     // ≥0: 목표 시간. 반복 사이에 최선수 안정성·점수 하락으로 늘리고 줄인다 (<0: timeMs·softTimePct 고정 규칙)
     uint64_t maxNodes = 0;      // 0: 노드 제한 없음
 };
 
@@ -146,6 +147,10 @@ struct Config {
     bool useAspiration = true;
     int  aspDelta      = 40;
     int  softTimePct   = 75;    // 경과 시간이 한도의 이 비율을 넘으면 다음 반복을 시작하지 않음
+    // 실전 시간 배분 (planTime, Limits::softMs 를 쓸 때)
+    bool tmDynamic     = false; // 남은 시간/tmDiv 를 목표로, 강제 수는 즉시·최선수 불안정하면 더·안정하면 덜 (끄면: min(수당, 남은/15) 고정)
+    int  tmDiv         = 20;
+    int  tmHardDiv     = 4;     // 한 수에 남은 시간의 1/tmHardDiv 이상은 쓰지 않음
     // 수 정렬 (generateScored 가 있을 때)
     int  orderPolicyW  = 4;     // 정렬 점수 = 히스토리 + orderPolicyW × 정책점수 / 4
     bool useCounter    = true;  // 상대 직전 수에 대한 반박수
@@ -201,6 +206,21 @@ struct Result {
     uint64_t qnodes   = 0;      // 정지 탐색 노드
 };
 
+// 실전 시간 배분: 수당 제한 turnMs, 남은 대국 시간 leftMs(<0 이면 없음) → Limits 의 하드/소프트 시간
+inline void planTime(const Config& c, int64_t turnMs, int64_t leftMs, Limits& lim) {
+    if (turnMs <= 0) turnMs = 1000;
+    const auto margin = [](int64_t t) { return std::max<int64_t>(20, t - std::min<int64_t>(60, t / 10)); };   // 통신 여유
+    const auto cap = [&](int64_t t) { return leftMs >= 0 ? std::min<int64_t>(t, std::max<int64_t>(1, leftMs / 4)) : t; };  // 시간 부족 시 안전장치
+    if (!c.tmDynamic) {
+        lim.timeMs = cap(margin(leftMs >= 0 ? std::min<int64_t>(turnMs, leftMs / 15) : turnMs));
+        lim.softMs = -1;
+        return;
+    }
+    lim.timeMs = margin(leftMs >= 0 ? std::min<int64_t>(turnMs, leftMs / std::max(1, c.tmHardDiv)) : turnMs);
+    lim.softMs = std::min<int64_t>(lim.timeMs, leftMs >= 0 ? leftMs / std::max(1, c.tmDiv) : lim.timeMs);
+    lim.timeMs = cap(std::min<int64_t>(lim.timeMs, std::max<int64_t>(20, lim.softMs * 3)));   // 반복 중간이라도 목표의 3배에서 끊는다
+}
+
 // ───────────────────────── 탐색기 ─────────────────────────
 template <class P>
 class Searcher {
@@ -232,11 +252,13 @@ public:
 
         Result res;
         int rootMoves[P::NUM_MOVES];
-        if (pos.isLoss() || pos.isDraw() || pos.generate(rootMoves) == 0) return res;
+        const int rootN = (pos.isLoss() || pos.isDraw()) ? 0 : pos.generate(rootMoves);
+        if (rootN == 0) return res;
+        int lastBest = NO_MOVE, stable = 0;
         rootBest_ = rootMoves[0];             // 어떤 경우에도 합법수 반환 보장
         res.bestMove = rootBest_;
 
-        int prev = 0;
+        int prev = 0, prevIter = 0;
         const int maxD = std::min(lim.maxDepth, MAX_PLY - 1);
         for (int d = 1; d <= maxD; ++d) {
             int alpha = -INF, beta = INF, delta = cfg.aspDelta, s = 0;
@@ -267,7 +289,15 @@ public:
             // 강제승/패가 확정되고 그 수순 길이만큼 읽었으면 종료
             if (std::abs(s) >= MATE_BOUND && d >= MATE - std::abs(s)) break;
             // 소프트 리밋: 다음 반복을 끝낼 가망이 없으면 시작하지 않음
-            if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
+            if (lim.softMs >= 0) {
+                if (rootN == 1) break;                                   // 강제 수
+                stable = res.bestMove == lastBest ? stable + 1 : 0;
+                lastBest = res.bestMove;
+                int f = stable == 0 ? 150 : stable >= 3 ? 60 : 100;      // 최선수가 바뀌었으면 더, 오래 그대로면 덜
+                if (d >= 4 && s < prevIter - 30) f = f * 13 / 10;        // 점수 하락 중이면 더
+                if (elapsedMs() * 10000 > lim.softMs * f * cfg.softTimePct) break;
+            } else if (lim.timeMs >= 0 && elapsedMs() * 100 > lim.timeMs * cfg.softTimePct) break;
+            prevIter = s;
         }
         const int sel = res.selDepth;
         fillStats(res);

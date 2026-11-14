@@ -68,14 +68,14 @@ struct Engine {
                     r.depth, r.selDepth, scoreStr(r.score, model.scale).c_str(), humanNum(double(r.nodes)).c_str(),
                     humanNum(nps).c_str(), (long long)r.timeMs, pv.c_str());
     }
-    int64_t budgetMs() const {
-        int64_t t = timeoutTurn > 0 ? timeoutTurn : 1000;
-        if (timeLeft >= 0) t = std::min<int64_t>(t, timeLeft / 15);
-        return std::max<int64_t>(20, t - std::min<int64_t>(60, t / 10));   // 통신 여유
+    ab::Limits limits() const {
+        ab::Limits lim;
+        ab::planTime(searcher.cfg, timeoutTurn, timeLeft, lim);
+        return lim;
     }
     void reset() { board.clear(); board.setModel(hasModel ? &model : nullptr); searcher.tt.clear(); searcher.clearHeuristics(); }
     std::string think() {
-        ab::Result r = searcher.think(board, ab::Limits{ab::MAX_PLY - 1, budgetMs(), 0});
+        ab::Result r = searcher.think(board, limits());
         int m = r.bestMove;
         if (m < 0 || !board.isEmptyMove(m)) { for (int q = 0; q < NMOVES; ++q) if (board.isEmptyMove(q)) { m = q; break; } }
         std::printf("MESSAGE [move %s] depth %d sel %d %s nodes %s nps %s tm %lldms\n", coord(m).c_str(), r.depth, r.selDepth,
