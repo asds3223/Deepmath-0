@@ -75,56 +75,38 @@ struct TTEntry {            // 16 bytes
 
 class TransTable {
 public:
-    explicit TransTable(size_t mb = 64, int ways = 1) : ways_(ways) { resize(mb); }
+    explicit TransTable(size_t mb = 64) { resize(mb); }
 
-    // ways: 한 슬롯(버킷)의 엔트리 수. 1 = 직접 사상, 4 = 버킷 안에서 깊이·세대로 교체 대상 선택
-    void setWays(int w) { if (w != ways_) { ways_ = w; resize(mb_); } }
     void resize(size_t mb) {
-        mb_ = mb;
         size_t n = 1;
-        while (n * 2 * sizeof(TTEntry) * ways_ <= mb * 1024 * 1024) n *= 2;
-        table_.assign(n * ways_, TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0});
+        while (n * 2 * sizeof(TTEntry) <= mb * 1024 * 1024) n *= 2;
+        table_.assign(n, TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0});
         mask_ = n - 1;
     }
     void clear() { std::fill(table_.begin(), table_.end(), TTEntry{0, 0, int16_t(NO_MOVE), 0, BOUND_NONE, 0, 0}); }
     void newSearch() { ++gen_; }
 
     const TTEntry* probe(uint64_t key) const {
-        const TTEntry* b = &table_[(key & mask_) * ways_];
-        for (int i = 0; i < ways_; ++i)
-            if (b[i].bound != BOUND_NONE && b[i].key == key) return &b[i];
-        return nullptr;
+        const TTEntry& e = table_[key & mask_];
+        return (e.bound != BOUND_NONE && e.key == key) ? &e : nullptr;
     }
 
+    // 직접 사상. 같은 키면 갱신(훨씬 깊은 기존 정보는 최선수만 갱신), 다른 키면 같은 세대의 훨씬 깊은 엔트리만 지킨다
     void store(uint64_t key, int score, int move, int depth, Bound bound) {
-        TTEntry* b = &table_[(key & mask_) * ways_];
-        TTEntry* e = nullptr;
-        for (int i = 0; i < ways_; ++i) if (b[i].bound != BOUND_NONE && b[i].key == key) { e = &b[i]; break; }
-        if (e) {
-            if (move == NO_MOVE) move = e->move;               // 기존 최선수 보존
-            if (bound != BOUND_EXACT && depth + 2 < e->depth) { // 훨씬 깊은 기존 정보는 유지
-                e->move = int16_t(move); e->gen = gen_;
-                return;
-            }
-        } else if (ways_ == 1) {
-            e = b;
-            if (e->bound != BOUND_NONE && e->gen == gen_ && e->depth > depth + 2) return;   // 같은 세대의 깊은 엔트리 우선
-        } else {
-            // 교체 대상: 빈 칸 > (깊이 − 8·세대 차이) 가 가장 작은 엔트리
-            int bestV = 1 << 30;
-            for (int i = 0; i < ways_; ++i) {
-                const int v = b[i].bound == BOUND_NONE ? -(1 << 29) : b[i].depth - 8 * uint8_t(gen_ - b[i].gen);
-                if (v < bestV) { bestV = v; e = &b[i]; }
-            }
+        TTEntry& e = table_[key & mask_];
+        if (e.bound != BOUND_NONE && e.key == key) {
+            if (move == NO_MOVE) move = e.move;               // 기존 최선수 보존
+            if (bound != BOUND_EXACT && depth + 2 < e.depth) { e.move = int16_t(move); e.gen = gen_; return; }
+        } else if (e.bound != BOUND_NONE && e.gen == gen_ && e.depth > depth + 2) {
+            return;
         }
-        e->key = key; e->score = int16_t(score); e->move = int16_t(move);
-        e->depth = int8_t(depth); e->bound = bound; e->gen = gen_;
+        e.key = key; e.score = int16_t(score); e.move = int16_t(move);
+        e.depth = int8_t(depth); e.bound = bound; e.gen = gen_;
     }
 
 private:
     std::vector<TTEntry> table_;
-    size_t  mask_ = 0, mb_ = 0;
-    int     ways_ = 1;
+    size_t  mask_ = 0;
     uint8_t gen_  = 0;
 };
 
@@ -159,8 +141,6 @@ struct Config {
     int  rpsMaxExtra   = 8;
     int  lmrDiv100     = 100;   // 로그형 늦은 수 감축 ln(d)·ln(i)·100/lmrDiv100 수 (0 = 끔), 실현 확률 감축에 더함
     int  tacCost       = 2;     // 전술 수(4·쌍삼 이상 만들기/막기)가 소모하는 깊이 — 반 수 연장 (A/B: +19, +22 Elo)
-    int  tacHiMin      = 0;     // 전술 등급(자기×2 + 상대)이 이 이상이면 tacHiCost 를 소모 (0 = 끔)
-    int  tacHiCost     = 1;
     int  forcedCost    = 0;     // 수가 하나뿐일 때(강제 응수) 소모 깊이 — 0 = 완전 연장 (A/B: 2→0 +23 Elo)
     bool useIIR        = true;  // TT 수 없는 깊은 노드는 한 수 얕게
     bool useImproving  = true;  // 2수 전보다 정적평가가 나빠졌으면 더 줄이고 더 자른다
@@ -176,8 +156,6 @@ struct Config {
     int  rfpMargin     = 60;    //   정적평가 - rfpMargin·(d - improving) ≥ beta 면 즉시 반환 (0 = 끔)
     int  razorDepth    = 2;     // 레이저링 (A/B 2,000판: d2 ≈ +15 Elo): 비PV·d ≤ razorDepth 에서 정적평가 + razorMargin·d < alpha 면 정지 탐색으로 확인
     int  razorMargin   = 200;
-    // 실험 중
-    int  ttWays        = 1;     // 전치표 버킷 크기 (1 = 직접 사상)
     // 정지 탐색 (mustDefend/forcingMoves 가 있을 때)
     bool useQuiesce    = true;
     int  qMaxPly       = 4;
@@ -236,7 +214,6 @@ public:
         interior_ = searched_ = cutFirst_ = cutTotal_ = qnodes_ = 0;
         stopFlag_.store(false, std::memory_order_relaxed);
         start_ = Clock::now();
-        tt.setWays(std::max(1, cfg.ttWays));
         tt.newSearch();
         buildLmr();
         for (auto& k : killers_) k[0] = k[1] = NO_MOVE;
@@ -453,7 +430,7 @@ private:
             int extra = 0, cost = ONE_PLY;
             if constexpr (scored) {
                 if (n == 1) cost = cfg.forcedCost;
-                else if (mTac & 128) cost = (cfg.tacHiMin && (mTac & 127) >= cfg.tacHiMin) ? cfg.tacHiCost : cfg.tacCost;
+                else if (mTac & 128) cost = cfg.tacCost;
                 else if (mOrder < (1 << 29) - 1) {
                     if (!root) {
                         if (cfg.usePolicyCut && i >= cfg.cutMinKeep && (smax - mScore) / 256 > cfg.cutGap) continue;
