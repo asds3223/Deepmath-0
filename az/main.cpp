@@ -591,6 +591,8 @@ static int cmdLoop(const Args& a) {
     }
     const int stageEvery = int(a.i("stage-every", 20)), stageGap = int(a.i("stage-gap", 40)), stagePairs = int(a.i("stage-pairs", 100));
     const double stageElo = a.f("stage-elo", 35.0);
+    // Minimum stage length after a growth (new units start with zero output weights and need time to be absorbed).
+    const int stageMin = int(a.i("stage-min", 80));
     const double reuse = a.f("reuse", 4.0);
     const int logEvery = int(a.i("log-every", 10)), logSteps = int(a.i("log-steps", 50));
     gLive = std::fopen((fs::path(dir) / "live.log").string().c_str(), "a");
@@ -681,7 +683,8 @@ static int cmdLoop(const Args& a) {
                          vs >= 0 ? ar.eloCI95() : 0.0);
             std::fflush(log);
         }
-        if (!growList.empty() && stageEvery > 0 && gen % stageEvery == 0 && gen - stageStart >= stageGap) {
+        if (!growList.empty() && stageEvery > 0 && gen % stageEvery == 0 && gen - stageStart >= stageGap &&
+            (stageStart == 0 || gen - stageStart >= stageMin)) {
             Net old;
             if (old.load(genPath(dir, "net", gen - stageGap))) {
                 auto sr = runArena(&net, &old, arenaSp, stagePairs, threads, uint64_t(gen) * 131, 4, logEvery > 0, std::string(tag) + " stage");
