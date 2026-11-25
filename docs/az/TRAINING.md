@@ -40,7 +40,7 @@ build/az bench       # 평가 속도 (H2) + MCTS 속도
 |---|---|---|
 | `loop` | **전체 학습 반복** (셀프플레이 → 학습 → 저장 → 주기적 대국) | `--dir run --gens 100 --games 200 --sims 1000 --threads 4 --window 8 --reuse 4 --arena-every 5 --arena-pairs 20` |
 | `selfplay` | 망 하나로 셀프플레이, 표본 파일 저장 | `--net F --games 100 --out selfplay.bin` |
-| `train` | 표본 파일로 학습 | `train a.bin b.bin --net F --out G --steps 1000` |
+| `train` | 표본 파일로 학습 | `train a.bin b.bin --net F --out G --steps 1000 --report 100` |
 | `arena` | 두 망 대국 (같은 오프닝을 색 바꿔 2판) | `--a F --b G|random --pairs 50 --sims 1000` |
 | `go` | 한 국면 분석 (상위 10수 N/P/Q, 증명 상태) | `--net F --fen "..." --sims 1000` |
 | `uci` | UCI 엔진 (cutechess, Arena 등 GUI 연결) | `--net F --sims 1000` / `go nodes N`, `go movetime`, `go wtime btime` |
@@ -69,10 +69,31 @@ g % arena-every == 0 이면: net_g vs net_{g-arena-every} 대국 → Elo (95% �
 | `data_XXXX.bin` | 그 세대 셀프플레이 표본 |
 | `adam.bin` | AdamW 1·2차 모멘트 |
 | `log.tsv` | 세대별 기록 (아래) |
+| `live.log` | **실시간 로그** — 모든 줄에 시각, 쓰자마자 flush (아래) |
 
 `log.tsv` 열: 세대, 대국 수, 백승/무/흑승, 메이트 수, 평균 ply, 표본 수, 셀프플레이 시간, 시뮬/초, 학습 걸음 수,
 정책 CE, 정책 KL(= CE − 목표 엔트로피, 망 정책과 탐색 방문 분포의 거리), 가치 CE, top-1 일치율, 학습 시간,
 대국 상대 세대, 점수, Elo, Elo 95% 반폭.
+
+### 실시간 로그 (`live.log`, 표준 출력과 같은 내용)
+
+```bash
+tail -f data/az_run1/live.log
+```
+
+```
+[2026-11-25 14:10:29] g11 selfplay 150/200 | 1-0 mate 15 ply | W/D/B 69/15/66 | 20.8s 7.21 g/s ETA 7s
+[...] g11 train 50/212 steps | policy KL 0.6012  value CE 0.6050  top1 21.4% | 0.2s
+[...] g15 arena 24/40 games | +15 =3 -6 | score 66.2% | 11.3s
+[...]   arena net_0015 vs net_0010: +24 =5 -11  score 66.2%  Elo +117 ± 106
+```
+
+| 옵션 | 기본값 | 뜻 |
+|---|---|---|
+| `--log-every N` | 10 (loop), 1 (selfplay) | 셀프플레이 N 판마다 한 줄: 결과, 끝난 이유, 길이, 누적 W/D/B, 속도, 남은 시간. 대국(arena)은 짝마다 한 줄 (0 이면 끔) |
+| `--log-steps N` | 50 | 학습 N 걸음마다 한 줄: 그 구간 평균 정책 KL, 가치 CE, top-1 |
+
+표준 출력은 줄 단위 버퍼라서 파일로 넘겨도(`> run.out`) 바로 보인다.
 
 ### 표본 형식 (`data_XXXX.bin`)
 

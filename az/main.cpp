@@ -2,6 +2,8 @@
 // Usage: az <command> [--key value ...]   (see docs/az/TRAINING.md)
 #include "train.hpp"
 #include <atomic>
+#include <cstdarg>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <iostream>
@@ -12,6 +14,34 @@ using namespace az;
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 static double secsSince(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
+
+// Real-time log: every line is timestamped and flushed immediately to stdout and (when set) <dir>/live.log.
+static FILE* gLive = nullptr;
+static std::mutex gLogMu;
+static void logLine(const char* fmt, ...) {
+    char msg[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    std::lock_guard<std::mutex> lk(gLogMu);
+    std::fprintf(stdout, "[%s] %s\n", ts, msg);
+    std::fflush(stdout);
+    if (gLive) { std::fprintf(gLive, "[%s] %s\n", ts, msg); std::fflush(gLive); }
+}
+static const char* outcomeName(Outcome o) {
+    switch (o) {
+        case Outcome::CHECKMATE: return "mate";
+        case Outcome::STALEMATE: return "stalemate";
+        case Outcome::FIFTY: return "50-move";
+        case Outcome::REPETITION: return "repetition";
+        case Outcome::MATERIAL: return "material";
+        default: return "cap/resign";
+    }
+}
 
 struct Args {
     std::map<std::string, std::string> kv;
@@ -67,7 +97,7 @@ struct SelfplaySummary {
 };
 
 static SelfplaySummary runSelfplay(const Net& net, const SelfplayConfig& cfg, int games, int threads, uint64_t seed,
-                                   Dataset& out, bool progress) {
+                                   Dataset& out, int logEvery, const std::string& tag) {
     SelfplaySummary sum;
     std::atomic<int> next{0};
     std::mutex mu;
@@ -96,15 +126,18 @@ static SelfplaySummary runSelfplay(const Net& net, const SelfplayConfig& cfg, in
                     case Outcome::MATERIAL: sum.material++; break;
                     default: break;
                 }
-                if (progress && (sum.games % std::max(1, games / 10) == 0 || sum.games == games))
-                    std::fprintf(stderr, "\r  selfplay %d/%d  (%.1fs)   ", sum.games, games, secsSince(t0));
+                if (logEvery > 0 && (sum.games % logEvery == 0 || sum.games == games)) {
+                    double el = secsSince(t0), gps = sum.games / std::max(1e-9, el);
+                    logLine("%s selfplay %d/%d | %s %s %d ply | W/D/B %d/%d/%d | %.1fs %.2f g/s ETA %.0fs", tag.c_str(), sum.games,
+                            games, gs.result > 0 ? "1-0" : gs.result < 0 ? "0-1" : "1/2", gs.resigned ? "resign" : gs.capped ? "cap" : outcomeName(gs.how),
+                            gs.plies, sum.white, sum.draws, sum.black, el, gps, (games - sum.games) / std::max(1e-9, gps));
+                }
             }
             std::lock_guard<std::mutex> lk(mu);
             out.append(local);
         });
     }
     for (auto& x : th) x.join();
-    if (progress) std::fprintf(stderr, "\n");
     sum.secs = secsSince(t0);
     return sum;
 }
@@ -125,7 +158,7 @@ struct ArenaResult {
 
 // `pairs` openings, each played twice with colors swapped. nullptr = random mover.
 static ArenaResult runArena(const Net* A, const Net* B, const SearchParams& sp, int pairs, int threads, uint64_t seed,
-                            int openingPlies, bool progress) {
+                            int openingPlies, bool progress, const std::string& tag = "") {
     ArenaResult r;
     std::atomic<int> next{0};
     std::mutex mu;
@@ -143,12 +176,13 @@ static ArenaResult runArena(const Net* A, const Net* B, const SearchParams& sp, 
                 int g2 = -playMatchGame(sb, sa, sp, op, rng);   // A black
                 std::lock_guard<std::mutex> lk(mu);
                 for (int g : {g1, g2}) (g > 0 ? r.w : g < 0 ? r.l : r.d)++;
-                if (progress) std::fprintf(stderr, "\r  arena %d/%d games  +%d =%d -%d  (%.1fs)   ", r.n(), 2 * pairs, r.w, r.d, r.l, secsSince(t0));
+                if (progress)
+                    logLine("%s arena %d/%d games | +%d =%d -%d | score %.1f%% | %.1fs", tag.c_str(), r.n(), 2 * pairs, r.w, r.d, r.l,
+                            100 * r.score(), secsSince(t0));
             }
         });
     }
     for (auto& x : th) x.join();
-    if (progress) std::fprintf(stderr, "\n");
     return r;
 }
 
@@ -384,9 +418,9 @@ static SelfplayConfig selfplayConfig(const Args& a) {
 }
 
 static void printSelfplay(const SelfplaySummary& s, size_t samples) {
-    std::printf("  games %d (W %d / D %d / B %d)  mate %d stalemate %d 50-move %d rep %d material %d cap %d resign %d\n", s.games,
+    logLine("  games %d (W %d / D %d / B %d)  mate %d stalemate %d 50-move %d rep %d material %d cap %d resign %d", s.games,
                 s.white, s.draws, s.black, s.mates, s.stalemates, s.fifty, s.rep, s.material, s.capped, s.resigned);
-    std::printf("  avg plies %.1f  samples %zu  %.1fs  (%.2f games/s, %.0f sims/s)\n", s.games ? double(s.plies) / s.games : 0.0,
+    logLine("  avg plies %.1f  samples %zu  %.1fs  (%.2f games/s, %.0f sims/s)", s.games ? double(s.plies) / s.games : 0.0,
                 samples, s.secs, s.games / std::max(1e-9, s.secs), s.sims / std::max(1e-9, s.secs));
 }
 
@@ -394,7 +428,8 @@ static int cmdSelfplay(const Args& a) {
     Net net;
     if (!loadNet(net, a.s("net", ""), uint64_t(a.i("seed", 1)))) return 1;
     Dataset d;
-    auto s = runSelfplay(net, selfplayConfig(a), int(a.i("games", 100)), int(a.i("threads", 4)), uint64_t(a.i("seed", 1)), d, true);
+    auto s = runSelfplay(net, selfplayConfig(a), int(a.i("games", 100)), int(a.i("threads", 4)), uint64_t(a.i("seed", 1)), d,
+                         int(a.i("log-every", 1)), "selfplay");
     printSelfplay(s, d.size());
     std::string out = a.s("out", "selfplay.bin");
     if (!d.save(out)) { std::fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
@@ -404,7 +439,7 @@ static int cmdSelfplay(const Args& a) {
 
 static void printLoss(const char* tag, const LossStats& st) {
     double n = std::max<int64_t>(1, st.n);
-    std::printf("  %s policy CE %.4f (target entropy %.4f, KL %.4f)  value CE %.4f  top1 %.1f%%\n", tag, st.pol / n,
+    logLine("  %s policy CE %.4f (target entropy %.4f, KL %.4f)  value CE %.4f  top1 %.1f%%", tag, st.pol / n,
                 st.polTargetEnt / n, (st.pol - st.polTargetEnt) / n, st.val / n, 100.0 * st.top1 / n);
 }
 
@@ -421,11 +456,12 @@ static int cmdTrain(const Args& a) {
     Trainer tr(trainConfig(a));
     std::mt19937_64 rng(uint64_t(a.i("seed", 1)));
     int steps = int(a.i("steps", 1000)), every = int(a.i("report", 100));
-    for (int s = 0; s < steps; s += every) {
-        auto st = tr.train(net, win, std::min(every, steps - s), rng);
-        std::printf("step %d\n", s + std::min(every, steps - s));
-        printLoss("train", st);
-    }
+    auto t0 = Clock::now();
+    tr.train(net, win, steps, rng, every, [&](int done, const LossStats& r) {
+        double k = std::max<int64_t>(1, r.n);
+        logLine("train %d/%d steps | policy CE %.4f KL %.4f  value CE %.4f  top1 %.1f%% | %.1fs", done, steps, r.pol / k,
+                (r.pol - r.polTargetEnt) / k, r.val / k, 100.0 * r.top1 / k, secsSince(t0));
+    });
     std::string out = a.s("out", "net.bin");
     if (!net.save(out)) return 1;
     std::printf("wrote %s\n", out.c_str());
@@ -457,6 +493,8 @@ static int cmdLoop(const Args& a) {
     const int gens = int(a.i("gens", 100)), games = int(a.i("games", 200)), threads = int(a.i("threads", 4));
     const int window = int(a.i("window", 8)), arenaEvery = int(a.i("arena-every", 5)), arenaPairs = int(a.i("arena-pairs", 20));
     const double reuse = a.f("reuse", 4.0);
+    const int logEvery = int(a.i("log-every", 10)), logSteps = int(a.i("log-steps", 50));
+    gLive = std::fopen((fs::path(dir) / "live.log").string().c_str(), "a");
     SelfplayConfig sc = selfplayConfig(a);
     TrainConfig tc = trainConfig(a);
     SearchParams arenaSp = searchParams(a);
@@ -468,7 +506,7 @@ static int cmdLoop(const Args& a) {
     if (!fs::exists(genPath(dir, "net", 0))) {
         net.init(uint64_t(a.i("seed", 1)));
         net.save(genPath(dir, "net", 0));
-        std::printf("initialized random net %s\n", genPath(dir, "net", 0).c_str());
+        logLine("initialized random net %s", genPath(dir, "net", 0).c_str());
     }
     if (!net.load(genPath(dir, "net", g))) { std::fprintf(stderr, "cannot load %s\n", genPath(dir, "net", g).c_str()); return 1; }
     Trainer tr(tc);
@@ -479,7 +517,7 @@ static int cmdLoop(const Args& a) {
         Dataset d;
         if (d.load(genPath(dir, "data", k))) win.push_back(std::move(d));
     }
-    std::printf("resume at generation %d (window %zu datasets)\n", g, win.size());
+    logLine("resume at generation %d (window %zu datasets)", g, win.size());
 
     std::string logPath = (fs::path(dir) / "log.tsv").string();
     bool newLog = !fs::exists(logPath);
@@ -488,9 +526,11 @@ static int cmdLoop(const Args& a) {
         std::fprintf(log, "gen\tgames\tW\tD\tB\tmates\tavg_plies\tsamples\tsp_secs\tsims_per_s\tsteps\tpol_ce\tpol_kl\tval_ce\ttop1\ttrain_secs\tarena_vs\tarena_score\tarena_elo\tarena_ci\n");
 
     for (int gen = g + 1; gen <= g + gens; ++gen) {
-        std::printf("── generation %d ──\n", gen);
+        logLine("── generation %d ──", gen);
+        char tag[32];
+        std::snprintf(tag, sizeof(tag), "g%d", gen);
         Dataset d;
-        auto s = runSelfplay(net, sc, games, threads, uint64_t(gen), d, true);
+        auto s = runSelfplay(net, sc, games, threads, uint64_t(gen), d, logEvery, tag);
         printSelfplay(s, d.size());
         d.save(genPath(dir, "data", gen));
         win.push_back(std::move(d));
@@ -500,9 +540,13 @@ static int cmdLoop(const Args& a) {
         int steps = std::max(1, int(reuse * double(win.back().size()) / tc.batch));
         std::mt19937_64 rng(uint64_t(gen) * 31337);
         auto t0 = Clock::now();
-        auto st = tr.train(net, wp, steps, rng);
+        auto st = tr.train(net, wp, steps, rng, logSteps, [&](int done, const LossStats& r) {
+            double k = std::max<int64_t>(1, r.n);
+            logLine("%s train %d/%d steps | policy KL %.4f  value CE %.4f  top1 %.1f%% | %.1fs", tag, done, steps,
+                    (r.pol - r.polTargetEnt) / k, r.val / k, 100.0 * r.top1 / k, secsSince(t0));
+        });
         double trainSecs = secsSince(t0);
-        std::printf("  train %d steps x %d (%.1fs)\n", steps, tc.batch, trainSecs);
+        logLine("  train %d steps x %d (%.1fs)", steps, tc.batch, trainSecs);
         printLoss("train", st);
         net.save(genPath(dir, "net", gen));
         tr.save(adamPath);
@@ -513,8 +557,8 @@ static int cmdLoop(const Args& a) {
             vs = gen - arenaEvery;
             Net old;
             if (old.load(genPath(dir, "net", vs))) {
-                ar = runArena(&net, &old, arenaSp, arenaPairs, threads, uint64_t(gen) * 77, 4, true);
-                std::printf("  arena net_%04d vs net_%04d: +%d =%d -%d  score %.1f%%  Elo %+.0f ± %.0f\n", gen, vs, ar.w, ar.d, ar.l,
+                ar = runArena(&net, &old, arenaSp, arenaPairs, threads, uint64_t(gen) * 77, 4, logEvery > 0, tag);
+                logLine("  arena net_%04d vs net_%04d: +%d =%d -%d  score %.1f%%  Elo %+.0f ± %.0f", gen, vs, ar.w, ar.d, ar.l,
                             100 * ar.score(), ArenaResult::elo(ar.score()), ar.eloCI95());
             } else vs = -1;
         }
@@ -530,6 +574,7 @@ static int cmdLoop(const Args& a) {
         std::fflush(stdout);
     }
     if (log) std::fclose(log);
+    if (gLive) { std::fclose(gLive); gLive = nullptr; }
     return 0;
 }
 
@@ -649,6 +694,7 @@ int main(int argc, char** argv) {
                      "  see docs/az/TRAINING.md\n");
         return 1;
     }
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered even when redirected to a file
     std::string c = argv[1];
     Args a(argc, argv, 2);
     if (c == "test") return cmdTest(a);

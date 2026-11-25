@@ -1,6 +1,7 @@
 // train.hpp — loss, hand-written backprop and AdamW for TA-NNUE (docs/az/THEORY.md §4).
 #pragma once
 #include "selfplay.hpp"
+#include <functional>
 #include <thread>
 
 namespace az {
@@ -179,7 +180,9 @@ struct Trainer {
     }
 
     // `steps` steps with uniform sampling over all positions of the window.
-    LossStats train(Net& net, const std::vector<const Dataset*>& window, int steps, std::mt19937_64& rng) {
+    // onLog(stepsDone, statsSinceLastLog) is called every `logEvery` steps and at the end (if logEvery > 0).
+    LossStats train(Net& net, const std::vector<const Dataset*>& window, int steps, std::mt19937_64& rng, int logEvery = 0,
+                    const std::function<void(int, const LossStats&)>& onLog = {}) {
         std::vector<size_t> cum;
         size_t total = 0;
         for (auto* d : window) { total += d->size(); cum.push_back(total); }
@@ -187,13 +190,17 @@ struct Trainer {
         if (!total) return all;
         std::uniform_int_distribution<size_t> U(0, total - 1);
         std::vector<std::pair<const Dataset*, size_t>> batch(size_t(cfg.batch));
+        LossStats recent;
         for (int s = 0; s < steps; ++s) {
             for (auto& b : batch) {
                 size_t x = U(rng);
                 size_t di = size_t(std::upper_bound(cum.begin(), cum.end(), x) - cum.begin());
                 b = {window[di], x - (di ? cum[di - 1] : 0)};
             }
-            all.add(step(net, batch));
+            LossStats st = step(net, batch);
+            all.add(st);
+            recent.add(st);
+            if (onLog && logEvery > 0 && ((s + 1) % logEvery == 0 || s + 1 == steps)) { onLog(s + 1, recent); recent = LossStats{}; }
         }
         return all;
     }
