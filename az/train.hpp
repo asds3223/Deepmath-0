@@ -12,6 +12,7 @@ struct TrainConfig {
     float valueW = 1.f;
     float lambda = 0.3f;   // P4: value target = (1-λ)·result + λ·root WDL
     int threads = 4;
+    int warmup = 1000;     // per-parameter LR warm-up (steps since the parameter was created or reset)
 };
 
 struct LossStats {
@@ -122,18 +123,20 @@ inline void sampleGrad(const Net& net, const SampleHdr& h, const uint32_t* mv, f
 struct Trainer {
     TrainConfig cfg;
     std::vector<float> m, v;
+    std::vector<int64_t> born;   // optimizer step at which each parameter was created (0 = from the start)
     int64_t t = 0;
     std::vector<std::vector<float>> grads;
 
-    Trainer(const TrainConfig& c, size_t total) : cfg(c), m(total, 0.f), v(total, 0.f) {}
+    Trainer(const TrainConfig& c, size_t total) : cfg(c), m(total, 0.f), v(total, 0.f), born(total, 0) {}
 
-    // v2: magic, parameter count, t, m, v.  Also reads the stage-1 format (t, m, v) when the size matches.
+    // v3: magic, parameter count, t, m, v, born.  Also reads v2 (no born) and the stage-1 format (t, m, v).
     bool save(const std::string& path) const {
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) return false;
-        uint64_t hdr[2] = {0x324D4441ull /*"ADM2"*/, m.size()};
+        uint64_t hdr[2] = {0x334D4441ull /*"ADM3"*/, m.size()};
         bool ok = std::fwrite(hdr, sizeof(hdr), 1, f) == 1 && std::fwrite(&t, sizeof(t), 1, f) == 1 &&
-                  std::fwrite(m.data(), 4, m.size(), f) == m.size() && std::fwrite(v.data(), 4, v.size(), f) == v.size();
+                  std::fwrite(m.data(), 4, m.size(), f) == m.size() && std::fwrite(v.data(), 4, v.size(), f) == v.size() &&
+                  std::fwrite(born.data(), 8, born.size(), f) == born.size();
         return std::fclose(f) == 0 && ok;
     }
     bool load(const std::string& path) {
@@ -141,7 +144,8 @@ struct Trainer {
         if (!f) return false;
         uint64_t hdr[2] = {0, 0};
         bool ok = std::fread(hdr, sizeof(hdr), 1, f) == 1;
-        if (ok && hdr[0] == 0x324D4441ull) ok = hdr[1] == m.size();
+        bool v3 = ok && hdr[0] == 0x334D4441ull;
+        if (ok && (v3 || hdr[0] == 0x324D4441ull)) ok = hdr[1] == m.size();
         else if (ok) {   // stage-1 format: no header
             std::fseek(f, 0, SEEK_END);
             ok = size_t(std::ftell(f)) == sizeof(t) + 8 * m.size();
@@ -149,15 +153,21 @@ struct Trainer {
         }
         ok = ok && std::fread(&t, sizeof(t), 1, f) == 1 && std::fread(m.data(), 4, m.size(), f) == m.size() &&
              std::fread(v.data(), 4, v.size(), f) == v.size();
+        if (ok && v3) ok = std::fread(born.data(), 8, born.size(), f) == born.size();
+        else std::fill(born.begin(), born.end(), 0);
         std::fclose(f);
         return ok;
     }
-    // Carry the optimizer state across a widening (new parameters start with zero moments).
+    // Carry the optimizer state across a widening. New parameters start with zero moments AND their own
+    // bias-correction / warm-up clock (born = t); without it, zero moments under a large global t give steps
+    // of 2-6x the learning rate for the first ~1,000 steps (bug found after the gen-360 growth).
     void remap(const std::vector<size_t>& map, size_t newTotal) {
         std::vector<float> m2(newTotal, 0.f), v2(newTotal, 0.f);
-        for (size_t i = 0; i < map.size(); ++i) { m2[map[i]] = m[i]; v2[map[i]] = v[i]; }
+        std::vector<int64_t> b2(newTotal, t);
+        for (size_t i = 0; i < map.size(); ++i) { m2[map[i]] = m[i]; v2[map[i]] = v[i]; b2[map[i]] = born[i]; }
         m.swap(m2);
         v.swap(v2);
+        born.swap(b2);
     }
 
     // One optimizer step on a batch of (dataset, sample) indices.
@@ -183,7 +193,13 @@ struct Trainer {
         // AdamW (decoupled weight decay)
         ++t;
         const float inv = 1.f / float(batch.size());
-        const float bc1 = 1.f - std::pow(cfg.beta1, float(t)), bc2 = 1.f - std::pow(cfg.beta2, float(t));
+        // Per-parameter bias correction and warm-up, from each parameter's own step count k = t - born.
+        constexpr int K = 20000;   // beyond this, beta^k < 3e-9 → corrections are 1
+        static std::vector<float> p1, p2;
+        if (p1.empty()) {
+            p1.resize(K); p2.resize(K);
+            for (int k = 0; k < K; ++k) { p1[k] = float(std::pow(double(cfg.beta1), k)); p2[k] = float(std::pow(double(cfg.beta2), k)); }
+        }
         const float lr = cfg.lr;
         float* w = net.w.data();
         for (size_t i = 0; i < net.L.TOTAL; ++i) {
@@ -192,8 +208,12 @@ struct Trainer {
             gi *= inv;
             m[i] = cfg.beta1 * m[i] + (1 - cfg.beta1) * gi;
             v[i] = cfg.beta2 * v[i] + (1 - cfg.beta2) * gi * gi;
+            int64_t k = t - born[i];
+            float bc1 = 1.f, bc2 = 1.f, warm = 1.f;
+            if (k < K) { bc1 = 1.f - p1[size_t(k)]; bc2 = 1.f - p2[size_t(k)]; }
+            if (k < cfg.warmup) warm = float(k) / float(cfg.warmup);
             float mh = m[i] / bc1, vh = v[i] / bc2;
-            w[i] -= lr * (mh / (std::sqrt(vh) + cfg.eps) + cfg.wd * w[i]);
+            w[i] -= warm * lr * (mh / (std::sqrt(vh) + cfg.eps) + cfg.wd * w[i]);
         }
         return tot;
     }

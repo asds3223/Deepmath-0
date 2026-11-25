@@ -82,6 +82,7 @@ static TrainConfig trainConfig(const Args& a) {
     c.lambda = float(a.f("lambda", c.lambda));
     c.valueW = float(a.f("vw", c.valueW));
     c.threads = int(a.i("threads", 4));
+    c.warmup = int(a.i("warmup", c.warmup));
     return c;
 }
 static bool loadNet(Net& n, const std::string& path, uint64_t seed) {
@@ -349,6 +350,39 @@ static int cmdTest(const Args&) {
         bool rt = wide.save("/tmp/az_widen_test.bin") && back.load("/tmp/az_widen_test.bin") && back.d == wide.d && back.w == wide.w;
         fails += !rt;
         std::printf("v2 net file round trip (%s) %s\n", wide.d.str().c_str(), rt ? "OK" : "FAIL");
+    }
+    // P6 optimizer: right after a widening, new parameters must move by at most ~lr/warmup per step (not 2-6x lr)
+    {
+        Net net;
+        net.init(31);
+        TrainConfig cfg;
+        cfg.threads = 1;
+        Trainer tr(cfg, net.L.TOTAL);
+        tr.t = 50000;   // long-trained optimizer, global bias correction long gone
+        Net wide;
+        auto map = widenNet(net, Dims{256, 64, 64}, wide, 9);
+        tr.remap(map, wide.L.TOTAL);
+        std::vector<bool> isOld(wide.L.TOTAL, false);
+        for (size_t i : map) isOld[i] = true;
+        Dataset d;
+        Position p;
+        p.setFen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3");
+        Move ms[MAX_MOVES];
+        int n = genLegal(p, ms);
+        SampleHdr h{};
+        std::memcpy(h.board, p.sq, 64);
+        h.stm = p.stm; h.castle = p.castle; h.result = 1; h.root[0] = 0.6f; h.root[1] = 0.3f; h.root[2] = 0.1f; h.n = uint16_t(n);
+        for (int i = 0; i < n; ++i) d.mv.push_back(uint32_t(policyIndex(ms[i], p.stm)) | (uint32_t(1 + i) << 16));
+        d.s.push_back(h);
+        float worst = 0;
+        for (int s = 0; s < 10; ++s) {
+            std::vector<float> before = wide.w;
+            tr.step(wide, {{&d, 0}});
+            for (size_t i = 0; i < wide.L.TOTAL; ++i) if (!isOld[i]) worst = std::max(worst, std::fabs(wide.w[i] - before[i]) / cfg.lr);
+        }
+        bool ok = worst < 0.02f;   // 10 steps of warm-up 1/1000..10/1000 with |m̂/√v̂| ≈ 1
+        fails += !ok;
+        std::printf("optimizer after widening: max new-param step %.4f x lr over 10 steps (limit 0.02) %s\n", worst, ok ? "OK" : "FAIL");
     }
     // Solver: mate in one must be found and proven
     {
