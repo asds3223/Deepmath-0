@@ -13,6 +13,7 @@ struct TrainConfig {
     float lambda = 0.3f;   // P4: value target = (1-λ)·result + λ·root WDL
     int threads = 4;
     int warmup = 1000;     // per-parameter LR warm-up (steps since the parameter was created or reset)
+    bool widthNorm = true; // μP-style LR scaling for layers whose fan-in grew (P6)
 };
 
 struct LossStats {
@@ -200,9 +201,18 @@ struct Trainer {
             p1.resize(K); p2.resize(K);
             for (int k = 0; k < K; ++k) { p1[k] = float(std::pow(double(cfg.beta1), k)); p2[k] = float(std::pow(double(cfg.beta2), k)); }
         }
-        const float lr = cfg.lr;
+        // Width-normalized LR (μP-style, Adam): a layer's per-step output change grows with its fan-in, so layers whose
+        // fan-in grew in a P6 widening get lr × (stage-1 fan-in / current fan-in). Stage 1 (128x32x32) → all factors 1.
+        const Layout& L = net.L;
+        const float sHid = cfg.widthNorm ? 256.f / float(2 * net.d.H) : 1.f;
+        const float sV = cfg.widthNorm ? 32.f / float(net.d.HV) : 1.f, sP = cfg.widthNorm ? 32.f / float(net.d.HP) : 1.f;
+        const std::pair<size_t, float> ranges[] = {{L.V1W, 1.f}, {L.V1B, sHid}, {L.V2W, 1.f}, {L.V2B, sV}, {L.P1W, 1.f},
+                                                   {L.P1B, sHid}, {L.PM, 1.f}, {L.PB, sP}, {L.TOTAL, 1.f}};
         float* w = net.w.data();
+        size_t ri = 0;
         for (size_t i = 0; i < net.L.TOTAL; ++i) {
+            while (i >= ranges[ri].first) ++ri;
+            const float lr = cfg.lr * ranges[ri].second;
             float gi = 0.f;
             for (int ti = 0; ti < T; ++ti) gi += grads[ti][i];
             gi *= inv;
