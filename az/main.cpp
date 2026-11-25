@@ -6,6 +6,8 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -237,7 +239,7 @@ static int cmdTest(const Args&) {
                 q.make(ms[std::uniform_int_distribution<int>(0, n - 1)(rng)]);
                 updateAcc(net, a, p, q, b);
                 refreshAcc(net, q, c);
-                for (int k = 0; k < 2; ++k) for (int j = 0; j < H; ++j) maxErr = std::max(maxErr, std::fabs(b.v[k][j] - c.v[k][j]));
+                for (int k = 0; k < 2; ++k) for (int j = 0; j < net.d.H; ++j) maxErr = std::max(maxErr, std::fabs(b.v[k][j] - c.v[k][j]));
                 a = b;
                 p = q;
                 ++steps;
@@ -247,11 +249,12 @@ static int cmdTest(const Args&) {
         fails += !ok;
         std::printf("incremental accumulator: %d chained updates, max |diff| %.2e %s\n", steps, maxErr, ok ? "OK" : "FAIL");
     }
-    // Backprop vs finite differences
-    {
+    // Backprop vs finite differences (stage-1 size and a grown size)
+    for (Dims gd : {Dims{128, 32, 32}, Dims{256, 64, 64}}) {
         Net net;
+        net.setDims(gd);
         net.init(11);
-        for (size_t i = L::V2B; i < L::V2B + 3; ++i) net.w[i] = 0.1f * float(i - L::V2B);
+        for (size_t i = net.L.V2B; i < net.L.V2B + 3; ++i) net.w[i] = 0.1f * float(i - net.L.V2B);
         std::mt19937_64 rng(5);
         TrainConfig cfg;
         cfg.lambda = 0.3f;
@@ -279,15 +282,16 @@ static int cmdTest(const Args&) {
             d.s.push_back(h);
             auto loss = [&]() {
                 LossStats st;
-                std::vector<float> g(L::TOTAL, 0.f);
+                std::vector<float> g(net.L.TOTAL, 0.f);
                 sampleGrad(net, d.s[0], d.mv.data(), g.data(), st, cfg);
                 return st.pol + cfg.valueW * st.val;
             };
-            std::vector<float> g(L::TOTAL, 0.f);
+            std::vector<float> g(net.L.TOTAL, 0.f);
             LossStats st;
             sampleGrad(net, d.s[0], d.mv.data(), g.data(), st, cfg);
-            const size_t regions[][2] = {{L::FTW, L::FTB}, {L::FTB, L::V1W}, {L::V1W, L::V1B}, {L::V2W, L::V2B},
-                                         {L::P1W, L::P1B}, {L::PM, L::PB}, {L::PB, L::TOTAL}};
+            const Layout& L = net.L;
+            const size_t regions[][2] = {{L.FTW, L.FTB}, {L.FTB, L.V1W}, {L.V1W, L.V1B}, {L.V2W, L.V2B},
+                                         {L.P1W, L.P1B}, {L.PM, L.PB}, {L.PB, L.TOTAL}};
             for (auto& rg : regions) {
                 std::vector<size_t> idx;
                 for (size_t i = rg[0]; i < rg[1]; ++i) if (std::fabs(g[i]) > 1e-3f) idx.push_back(i);
@@ -307,7 +311,44 @@ static int cmdTest(const Args&) {
         }
         bool ok = checked > 50 && good >= 0.9 * checked;
         fails += !ok;
-        std::printf("gradient check: %d/%d params within 5%% of finite differences %s\n", good, checked, ok ? "OK" : "FAIL");
+        std::printf("gradient check %s: %d/%d params within 5%% of finite differences %s\n", gd.str().c_str(), good, checked, ok ? "OK" : "FAIL");
+    }
+    // P6: widening must not change any output; the widened net must still pass incremental + gradient checks
+    {
+        Net net;
+        net.init(21);
+        Net wide;
+        auto map = widenNet(net, Dims{256, 64, 64}, wide, 5);
+        std::mt19937_64 rng(8);
+        float maxErr = 0;
+        bool mapOk = map.size() == net.L.TOTAL;
+        for (size_t i = 0; i < map.size() && mapOk; ++i) mapOk = wide.w[map[i]] == net.w[i];
+        for (int g = 0; g < 50; ++g) {
+            Position p;
+            p.setStart();
+            for (int ply = 0; ply < 60; ++ply) {
+                Move ms[MAX_MOVES];
+                int n = genLegal(p, ms);
+                if (!n) break;
+                Acc a1, a2;
+                float p1[MAX_MOVES], p2[MAX_MOVES], w1[3], w2[3];
+                refreshAcc(net, p, a1);
+                refreshAcc(wide, p, a2);
+                evaluate(net, a1, p.stm, ms, n, p1, w1);
+                evaluate(wide, a2, p.stm, ms, n, p2, w2);
+                for (int k = 0; k < 3; ++k) maxErr = std::max(maxErr, std::fabs(w1[k] - w2[k]));
+                for (int i = 0; i < n; ++i) maxErr = std::max(maxErr, std::fabs(p1[i] - p2[i]));
+                p.make(ms[std::uniform_int_distribution<int>(0, n - 1)(rng)]);
+            }
+        }
+        bool ok = mapOk && maxErr < 1e-5f;
+        fails += !ok;
+        std::printf("widen 128x32x32 -> 256x64x64: output max |diff| %.2e, param map %s %s\n", maxErr, mapOk ? "exact" : "BROKEN",
+                    ok ? "OK" : "FAIL");
+        Net back;
+        bool rt = wide.save("/tmp/az_widen_test.bin") && back.load("/tmp/az_widen_test.bin") && back.d == wide.d && back.w == wide.w;
+        fails += !rt;
+        std::printf("v2 net file round trip (%s) %s\n", wide.d.str().c_str(), rt ? "OK" : "FAIL");
     }
     // Solver: mate in one must be found and proven
     {
@@ -375,10 +416,12 @@ static int cmdBench(const Args& a) {
             refreshAcc(net, pr.after, child);
             evaluate(net, child, pr.after.stm, nullptr, 0, pri, wdl);   // value + (policy hidden computed below)
             const float* w = net.w.data();
-            float z[2 * H], hp[HP];
+            const Layout& L = net.L;
+            const int H = net.d.H, HP = net.d.HP;
+            float z[2 * HMAX], hp[HPMAX];
             for (int j = 0; j < H; ++j) { z[j] = clamp01(child.v[pr.after.stm][j]); z[H + j] = clamp01(child.v[pr.after.stm ^ 1][j]); }
-            for (int o = 0; o < HP; ++o) hp[o] = clamp01(w[L::P1B + o] + dot(&w[L::P1W + size_t(o) * 2 * H], z, 2 * H));
-            for (int k = 0; k < NPOL; ++k) dense[k] = w[L::PB + k] + dot(&w[L::PM + size_t(k) * HP], hp, HP);
+            for (int o = 0; o < HP; ++o) hp[o] = clamp01(w[L.P1B + o] + dot(&w[L.P1W + size_t(o) * 2 * H], z, 2 * H));
+            for (int k = 0; k < NPOL; ++k) dense[k] = w[L.PB + k] + dot(&w[L.PM + size_t(k) * HP], hp, HP);
             for (size_t i = 0; i < pr.moves.size(); ++i) pri[i] = dense[policyIndex(pr.moves[i], pr.after.stm)];
             softmaxInPlace(pri, int(pr.moves.size()));
             sink += pri[0] + wdl[0];
@@ -453,7 +496,7 @@ static int cmdTrain(const Args& a) {
         win.push_back(&ds[i]);
     }
     if (win.empty()) { std::fprintf(stderr, "usage: az train data1.bin [data2.bin ...] --net in --out out --steps N\n"); return 1; }
-    Trainer tr(trainConfig(a));
+    Trainer tr(trainConfig(a), net.L.TOTAL);
     std::mt19937_64 rng(uint64_t(a.i("seed", 1)));
     int steps = int(a.i("steps", 1000)), every = int(a.i("report", 100));
     auto t0 = Clock::now();
@@ -465,6 +508,49 @@ static int cmdTrain(const Args& a) {
     std::string out = a.s("out", "net.bin");
     if (!net.save(out)) return 1;
     std::printf("wrote %s\n", out.c_str());
+    return 0;
+}
+
+// Loss of a net on data files without training (generalization check: seen vs unseen generations).
+static int cmdEvalLoss(const Args& a) {
+    Net net;
+    if (!loadNet(net, a.s("net", ""), 1)) return 1;
+    TrainConfig cfg = trainConfig(a);
+    size_t limit = size_t(a.i("limit", 20000));
+    std::vector<float> scratch(net.L.TOTAL, 0.f);
+    for (auto& path : a.pos) {
+        Dataset d;
+        if (!d.load(path)) { std::fprintf(stderr, "cannot load %s\n", path.c_str()); return 1; }
+        LossStats st;
+        size_t n = std::min(limit, d.size()), stride = std::max<size_t>(1, d.size() / std::max<size_t>(1, n));
+        for (size_t i = 0; i < d.size() && st.n < int64_t(n); i += stride) sampleGrad(net, d.s[i], &d.mv[d.s[i].off], scratch.data(), st, cfg);
+        double k = std::max<int64_t>(1, st.n);
+        std::printf("%-40s n %6lld  policy CE %.4f KL %.4f  value CE %.4f  top1 %.1f%%\n", path.c_str(), (long long)st.n, st.pol / k,
+                    (st.pol - st.polTargetEnt) / k, st.val / k, 100.0 * st.top1 / k);
+    }
+    return 0;
+}
+
+// Manual P6 widening: az grow --net in.bin --out out.bin --to 256x64x64 [--adam-in a --adam-out b]
+static int cmdGrow(const Args& a) {
+    Net net;
+    if (!loadNet(net, a.s("net", ""), 1)) return 1;
+    Dims nd;
+    if (std::sscanf(a.s("to", "").c_str(), "%dx%dx%d", &nd.H, &nd.HV, &nd.HP) != 3 || nd.H < net.d.H || nd.HV < net.d.HV ||
+        nd.HP < net.d.HP || nd.H > HMAX || nd.HV > HVMAX || nd.HP > HPMAX) {
+        std::fprintf(stderr, "--to HxHVxHP must be >= current %s and <= %dx%dx%d\n", net.d.str().c_str(), HMAX, HVMAX, HPMAX);
+        return 1;
+    }
+    Net wide;
+    auto map = widenNet(net, nd, wide, uint64_t(a.i("seed", 1)));
+    if (a.has("adam-in")) {
+        Trainer tr(TrainConfig{}, net.L.TOTAL);
+        if (!tr.load(a.s("adam-in", ""))) { std::fprintf(stderr, "cannot load optimizer state\n"); return 1; }
+        tr.remap(map, wide.L.TOTAL);
+        tr.save(a.s("adam-out", "adam_wide.bin"));
+    }
+    if (!wide.save(a.s("out", "net_wide.bin"))) return 1;
+    std::printf("widened %s -> %s\n", net.d.str().c_str(), wide.d.str().c_str());
     return 0;
 }
 
@@ -491,7 +577,20 @@ static int cmdLoop(const Args& a) {
     const std::string dir = a.s("dir", "run");
     fs::create_directories(dir);
     const int gens = int(a.i("gens", 100)), games = int(a.i("games", 200)), threads = int(a.i("threads", 4));
-    const int window = int(a.i("window", 8)), arenaEvery = int(a.i("arena-every", 5)), arenaPairs = int(a.i("arena-pairs", 20));
+    const int window = int(a.i("window", 20)), arenaEvery = int(a.i("arena-every", 10)), arenaPairs = int(a.i("arena-pairs", 50));
+    // P6 staged growth: every `stage-every` gens (once the stage is `stage-gap` gens old) play net_g vs net_{g-gap};
+    // if the gain is below `stage-elo`, widen the same net to the next size in --grow (function-preserving).
+    std::vector<Dims> growList;
+    {
+        std::stringstream gs(a.s("grow", ""));
+        std::string item;
+        while (std::getline(gs, item, ',')) {
+            Dims d;
+            if (std::sscanf(item.c_str(), "%dx%dx%d", &d.H, &d.HV, &d.HP) == 3) growList.push_back(d);
+        }
+    }
+    const int stageEvery = int(a.i("stage-every", 20)), stageGap = int(a.i("stage-gap", 40)), stagePairs = int(a.i("stage-pairs", 100));
+    const double stageElo = a.f("stage-elo", 35.0);
     const double reuse = a.f("reuse", 4.0);
     const int logEvery = int(a.i("log-every", 10)), logSteps = int(a.i("log-steps", 50));
     gLive = std::fopen((fs::path(dir) / "live.log").string().c_str(), "a");
@@ -509,7 +608,7 @@ static int cmdLoop(const Args& a) {
         logLine("initialized random net %s", genPath(dir, "net", 0).c_str());
     }
     if (!net.load(genPath(dir, "net", g))) { std::fprintf(stderr, "cannot load %s\n", genPath(dir, "net", g).c_str()); return 1; }
-    Trainer tr(tc);
+    Trainer tr(tc, net.L.TOTAL);
     std::string adamPath = (fs::path(dir) / "adam.bin").string();
     if (g > 0 && !tr.load(adamPath)) std::printf("note: no optimizer state found, starting AdamW fresh\n");
     std::deque<Dataset> win;
@@ -517,7 +616,18 @@ static int cmdLoop(const Args& a) {
         Dataset d;
         if (d.load(genPath(dir, "data", k))) win.push_back(std::move(d));
     }
-    logLine("resume at generation %d (window %zu datasets)", g, win.size());
+    std::string stagePath = (fs::path(dir) / "stages.tsv").string();
+    int stageStart = 0;
+    {
+        std::ifstream sf(stagePath);
+        std::string ln;
+        while (std::getline(sf, ln)) {
+            int sg = 0;
+            char what[32] = {0};
+            if (std::sscanf(ln.c_str(), "%d\t%*s\t%*s\t%*s\t%*s\t%*s\t%31s", &sg, what) == 2 && std::string(what) == "grow") stageStart = sg;
+        }
+    }
+    logLine("resume at generation %d (net %s, stage since gen %d, window %zu datasets)", g, net.d.str().c_str(), stageStart, win.size());
 
     std::string logPath = (fs::path(dir) / "log.tsv").string();
     bool newLog = !fs::exists(logPath);
@@ -570,6 +680,36 @@ static int cmdLoop(const Args& a) {
                          st.top1 / n, trainSecs, vs, vs >= 0 ? ar.score() : 0.0, vs >= 0 ? ArenaResult::elo(ar.score()) : 0.0,
                          vs >= 0 ? ar.eloCI95() : 0.0);
             std::fflush(log);
+        }
+        if (!growList.empty() && stageEvery > 0 && gen % stageEvery == 0 && gen - stageStart >= stageGap) {
+            Net old;
+            if (old.load(genPath(dir, "net", gen - stageGap))) {
+                auto sr = runArena(&net, &old, arenaSp, stagePairs, threads, uint64_t(gen) * 131, 4, logEvery > 0, std::string(tag) + " stage");
+                double e = ArenaResult::elo(sr.score());
+                const Dims* next = nullptr;
+                for (auto& d : growList) if (d.H >= net.d.H && d.HV >= net.d.HV && d.HP >= net.d.HP && !(d == net.d)) { next = &d; break; }
+                bool plateau = e < stageElo;
+                const char* decision = !plateau ? "continue" : next ? "grow" : "plateau-no-next-size";
+                logLine("  stage check net_%04d vs net_%04d: +%d =%d -%d  Elo %+.0f ± %.0f  (threshold %+.0f) → %s", gen, gen - stageGap, sr.w,
+                        sr.d, sr.l, e, sr.eloCI95(), stageElo, decision);
+                if (plateau && next) {
+                    Dims from = net.d;
+                    fs::copy_file(genPath(dir, "net", gen), (fs::path(dir) / ("net_" + std::to_string(gen) + "_pre_" + from.str() + ".bin")),
+                                  fs::copy_options::overwrite_existing);
+                    Net wide;
+                    auto map = widenNet(net, *next, wide, uint64_t(gen) * 7 + 3);
+                    tr.remap(map, wide.L.TOTAL);
+                    net = std::move(wide);
+                    net.save(genPath(dir, "net", gen));
+                    tr.save(adamPath);
+                    stageStart = gen;
+                    logLine("  GROW at gen %d: %s → %s (function-preserving; same lineage continues)", gen, from.str().c_str(), net.d.str().c_str());
+                }
+                if (FILE* sf = std::fopen(stagePath.c_str(), "a")) {
+                    std::fprintf(sf, "%d\t%s\t%d\t%.3f\t%.0f\t%.0f\t%s\n", gen, net.d.str().c_str(), gen - stageGap, sr.score(), e, sr.eloCI95(), decision);
+                    std::fclose(sf);
+                }
+            }
         }
         std::fflush(stdout);
     }
@@ -702,6 +842,8 @@ int main(int argc, char** argv) {
     if (c == "selfplay") return cmdSelfplay(a);
     if (c == "train") return cmdTrain(a);
     if (c == "arena") return cmdArena(a);
+    if (c == "evalloss") return cmdEvalLoss(a);
+    if (c == "grow") return cmdGrow(a);
     if (c == "loop") return cmdLoop(a);
     if (c == "go") return cmdGo(a);
     if (c == "uci") return cmdUci(a);

@@ -188,4 +188,20 @@ build/az uci --net data/az_run1/net_0040.bin                 # GUI 연결
     직접 측정하니 net_0080 vs net_0060 = +70 ± 65, vs net_0040 = +186 ± 72 로 정체가 아니었다.
     그래서 88세대부터 1e-3 으로 되돌렸다. 40판·100판 인접 측정 한두 번으로 설정을 바꾸지 않는다.
 
+### 2단계 운영: 계단식 성장 (161세대부터, THEORY P6)
+
+```bash
+build/az loop --dir data/az_run1 --window 20 --lr 1e-3 --arena-every 10 --arena-pairs 50 \
+  --grow 256x64x64,512x128x128 --stage-every 20 --stage-gap 40 --stage-pairs 100 --stage-elo 35
+```
+
+- 판정·성장 기록: `data/az_run1/stages.tsv` (세대, 크기, 비교 세대, 점수, Elo, 95% 반폭, 판정 continue / grow).
+- 넓히기 직전 망은 `net_<g>_pre_128x32x32.bin` 으로 남긴다. `net_<g>.bin` 은 넓힌 망이다 (같은 함수).
+- 실시간 로그 `live.log` 에 `stage check …` 와 `GROW at gen …` 줄이 나온다.
+- 크기별 속도 (1 스레드): 128 = 5.8 ms/수, 256 = 12.5 ms/수 (1,000 시뮬).
+- 수동 확장: `build/az grow --net in.bin --to 256x64x64 --out out.bin [--adam-in adam.bin --adam-out adam2.bin]`
+- 진단: `build/az evalloss --net net.bin data_a.bin data_b.bin` → 본 데이터와 새 데이터의 손실 차이 (과적합·용량 판정)
+- 160세대 시점 진단: 정책 KL 은 본 데이터·새 데이터 모두 약 0.8 (용량 부족). 가치 CE 는 0.49 vs 0.76 (암기).
+- 160세대 직접 측정: net_0160 vs net_0120 = +69 ± 46, vs net_0080 = +125 ± 48 (여전히 오르지만 둔화).
+
 **다음 후보 (미실행):** 세대당 판 수 증가, λ = 0 대조군 (H5), 재사용 배수, 은닉 폭 H (128 → 256).
