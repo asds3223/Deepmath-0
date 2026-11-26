@@ -124,6 +124,33 @@ tail -f data/az_run1/live.log
 
 셀프플레이가 시간의 대부분이다. 학습은 세대당 1초 안팎이다.
 
+## 5-1. UCI 엔진 exe (`az/engine.cpp`, 2026-11-26)
+
+```bash
+az/build_engine.sh [NET.bin]     # 기본: data/az_run1 의 최신 net_XXXX.bin
+# → dist/az-engine.exe (Windows x64, 정적 링크, 망 내장, DLL 의존: KERNEL32·msvcrt 뿐)
+# → build/az-engine     (Linux, 같은 소스·같은 최적화)
+```
+
+- **최적화:** `-O3 -march=x86-64-v2 -mtune=generic`. 특정 CPU 전용(AVX2 등)이 아니다. SSE4.2·POPCNT 가 있는 64비트 CPU(2009년 이후)에서 돈다.
+- **폰더링 없음:** Ponder 옵션을 내지 않는다. `go ponder` 가 와도 보통 탐색으로 처리한다.
+- **탐색:** 공유 트리 PUCT, 스레드 사이 가상 손실(virtual loss). 선택·역전파만 잠그고, 수 생성과 망 평가는 잠금 밖에서 한다. 증명 전파(P5)를 포함한다. 뿌리 잡음과 온도는 없다.
+- **학습용 `build/az` 와 분리:** 학습 탐색 코드(mcts.hpp)는 바꾸지 않았다. 학습 중인 실행에 영향이 없다.
+
+| UCI 옵션 | 기본값 | 뜻 |
+|---|---|---|
+| Hash | 512 (MB) | 탐색 트리 메모리. 90% 노드, 10% 누산기. 노드가 다 차면 그 수의 탐색을 끝낸다 (512 MB ≈ 45만 시뮬) |
+| Threads | 1 | 탐색 스레드 수 |
+| MoveOverhead | 50 (ms) | 통신 지연 여유 |
+| MoveTime | 0 (ms) | 0 이 아니면 시계와 무관하게 수당 고정 시간 |
+| Nodes | 0 | 0 이 아니면 수당 시뮬 수 상한 |
+| EvalFile | `<embedded>` | 다른 망 파일 (`net_XXXX.bin`) |
+
+- **시간 관리:** `movetime` 이 있으면 그 시간 − 여유. 시계(`wtime/btime/winc/binc/movestogo`)가 있으면 남은 시간/30 (또는 movestogo) + 증가분×¾ − 여유, 상한은 남은 시간의 1/3. `go nodes N`, `go infinite` + `stop` 을 지원한다. 옵션 없는 `go` 는 1,000 시뮬이다.
+- **검증 (Linux 빌드, 같은 소스):** uci/isready/setoption/position/go/stop/quit. movetime 1000 → 1.03 s, 시계 60 s+1 s → 2.71 s (예산 2.7 s), movetime 8000 → 7.95 s. infinite+stop, nodes 5000, 메이트 1수(a1a8, 증명 승), 수 없는 국면 → `bestmove 0000`.
+  Windows exe 는 이 컨테이너의 wine 이 hello.exe 도 실행하지 못해서 직접 실행 검증을 하지 못했다. 가져오는 DLL 은 KERNEL32·msvcrt 뿐임을 확인했다.
+- **속도 참고 (512×128×128 망, 학습과 CPU 를 나눠 쓰는 상태):** 1 스레드 약 1.8만 시뮬/초, 4 스레드 약 3만 시뮬/초.
+
 ## 6. 실행 예
 
 ```bash
