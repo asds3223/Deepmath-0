@@ -37,31 +37,71 @@ public:
     std::vector<int> path;
     Position root;
     int64_t evals = 0;
+    bool reusable = false;
 
     explicit Searcher(const Net* n, uint64_t seed = 1) : net(n), rng(seed) {}
 
     // Caller guarantees the root is not terminal (has legal moves, game not over).
-    int search(const Position& rootPos, const std::vector<u64>& gameHist) {
+    // reuse = true: if advance() kept the subtree of the move just played and it is this position, continue from it;
+    // sims then counts TOTAL root visits (P7 tree reuse, as in Lc0/KataGo). Otherwise a fresh tree (sims new playouts).
+    int search(const Position& rootPos, const std::vector<u64>& gameHist, bool reuse = false) {
         auto t0 = std::chrono::steady_clock::now();
-        root = rootPos;
         hist = gameHist;
-        nodes.clear();
-        accs.clear();
-        nodes.reserve(size_t(sp.sims) * 40 + 256);
-        accs.reserve(size_t(sp.sims) + 2);   // every simulation expands at most one node → no reallocation
-        nodes.emplace_back();
-        float v, d;
-        expand(0, root, nullptr, -1, v, d);
-        nodes[0].N = 1; nodes[0].W = -v; nodes[0].D = d;
+        bool kept = reuse && reusable && root.key == rootPos.key && !nodes.empty() && nodes[0].first >= 0;
+        reusable = false;
+        if (!kept) {
+            root = rootPos;
+            nodes.clear();
+            accs.clear();
+            nodes.reserve(size_t(sp.sims) * 40 + 256);
+            accs.reserve(size_t(sp.sims) + 2);
+            nodes.emplace_back();
+            float v, d;
+            expand(0, root, nullptr, -1, v, d);
+            nodes[0].N = 1; nodes[0].W = -v; nodes[0].D = d;
+        } else {
+            nodes.reserve(nodes.size() + size_t(sp.sims) * 40 + 256);
+            accs.reserve(accs.size() + size_t(sp.sims) + 2);
+        }
         if (sp.noise) addNoise();
+        const int todo = std::max(0, sp.sims - (nodes[0].N - 1));
         int done = 0;
-        for (; done < sp.sims && nodes[0].proven == UNKNOWN; ++done) {
+        for (; done < todo && nodes[0].proven == UNKNOWN; ++done) {
             simulate();
             if (sp.maxMs && (done & 31) == 31 &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() >= sp.maxMs)
                 break;
         }
         return done;
+    }
+
+    // P7 tree reuse: keep only the subtree under move m (compacted, accumulators carried). Returns false (fresh tree
+    // next time) when m was not expanded or is already proven.
+    bool advance(Move m) {
+        reusable = false;
+        if (nodes.empty() || nodes[0].first < 0) return false;
+        int ci = -1;
+        for (int k = 0; k < nodes[0].nch; ++k) if (nodes[nodes[0].first + k].move == m) ci = nodes[0].first + k;
+        if (ci < 0 || nodes[ci].first < 0 || nodes[ci].proven != UNKNOWN) return false;
+        std::vector<Node> nn;
+        std::vector<Acc> na;
+        std::vector<int> from;
+        nn.reserve(nodes.size() / 2 + 64);
+        nn.push_back(nodes[ci]);
+        from.push_back(ci);
+        for (size_t q = 0; q < nn.size(); ++q) {
+            const Node& o = nodes[from[q]];
+            if (o.acc >= 0) { na.push_back(accs[o.acc]); nn[q].acc = int32_t(na.size() - 1); }
+            if (o.first >= 0) {
+                nn[q].first = int32_t(nn.size());
+                for (int k = 0; k < o.nch; ++k) { nn.push_back(nodes[o.first + k]); from.push_back(o.first + k); }
+            }
+        }
+        nodes.swap(nn);
+        accs.swap(na);
+        root.make(m);
+        reusable = true;
+        return true;
     }
 
     const Node& rootNode() const { return nodes[0]; }

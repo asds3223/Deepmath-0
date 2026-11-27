@@ -70,6 +70,7 @@ struct SelfplayConfig {
     // and is recorded; otherwise a fast search (fastSims, no noise) only plays the move. pFull = 1 → plain AlphaZero.
     float pFull = 1.f;
     int fastSims = 200;
+    bool reuseTree = false;   // P7 tree reuse between moves (Lc0/KataGo); sims = total root visits
 };
 
 struct GameStats {
@@ -122,7 +123,7 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
             bool full = cfg.pFull >= 1.f || std::uniform_real_distribution<float>(0, 1)(S.rng) < cfg.pFull;
             S.sp = cfg.sp;
             if (!full) { S.sp.sims = cfg.fastSims; S.sp.noise = false; }
-            gs.sims += S.search(pos, hist);
+            gs.sims += S.search(pos, hist, cfg.reuseTree);
             if (full) recordSample(S, pos, out);
             m = S.pickMove(ply < cfg.tempPlies ? 1.f : 0.f);
             if (allowResign) {
@@ -133,6 +134,7 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
                 } else low[pos.stm] = 0;
             }
         }
+        if (cfg.reuseTree) S.advance(m);
         hist.push_back(pos.key);
         pos.make(m);
     }

@@ -419,6 +419,44 @@ static int cmdTest(const Args&) {
         fails += !ok;
         std::printf("sparse fused inference %s vs reference: max |diff| %.2e %s\n", gd.str().c_str(), maxErr, ok ? "OK" : "FAIL");
     }
+    // P7 tree reuse: the kept subtree keeps its statistics, its accumulators match the position, and self-play runs
+    {
+        Net net;
+        net.init(51);
+        net.prepareInference();
+        Searcher S(&net, 3);
+        S.sp.sims = 600;
+        Position p;
+        p.setFen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3");
+        S.search(p, {});
+        Move m = S.pickMove(0);
+        const Node& r = S.rootNode();
+        int cN = 0; float cW = 0; int cCh = 0;
+        for (int k = 0; k < r.nch; ++k) if (S.child(r, k).move == m) { cN = S.child(r, k).N; cW = S.child(r, k).W; cCh = S.child(r, k).nch; }
+        bool kept = S.advance(m);
+        Position q = p;
+        q.make(m);
+        Acc ref;
+        refreshAcc(net, q, ref);
+        float accErr = 0;
+        for (int c = 0; c < 2; ++c) for (int j = 0; j < net.d.H; ++j) accErr = std::max(accErr, std::fabs(ref.v[c][j] - S.accs[S.rootNode().acc].v[c][j]));
+        bool linksOk = true;
+        for (const Node& n : S.nodes) if (n.first >= 0 && size_t(n.first + n.nch) > S.nodes.size()) linksOk = false;
+        int before = S.rootNode().N;
+        int ran = S.search(q, {p.key}, true);
+        bool ok = kept && S.rootNode().nch == cCh && before == cN && std::fabs(S.nodes.size() ? 0 : 1) == 0 && accErr < 1e-4f && linksOk &&
+                  ran == 600 - (cN - 1) && S.rootNode().N == 601 && std::fabs(cW) >= 0;
+        fails += !ok;
+        std::printf("tree reuse: kept N=%d (of 600), acc err %.1e, links %s, continued %d sims to N=%d %s\n", cN, accErr,
+                    linksOk ? "ok" : "BROKEN", ran, S.rootNode().N, ok ? "OK" : "FAIL");
+        SelfplayConfig sc;
+        sc.sp.sims = 200; sc.sp.noise = true; sc.pFull = 0.25f; sc.fastSims = 50; sc.reuseTree = true; sc.maxPlies = 120;
+        Dataset d;
+        GameStats gs = playSelfplayGame(S, sc, d);
+        bool ok2 = gs.plies > 0 && d.size() > 0;
+        fails += !ok2;
+        std::printf("self-play with PCR + tree reuse: %d plies, %zu samples, %lld sims %s\n", gs.plies, d.size(), (long long)gs.sims, ok2 ? "OK" : "FAIL");
+    }
     // Solver: mate in one must be found and proven
     {
         Net net;
@@ -541,6 +579,7 @@ static SelfplayConfig selfplayConfig(const Args& a) {
     c.resignQ = float(a.f("resign", c.resignQ));
     c.pFull = float(a.f("pcr-full", c.pFull));
     c.fastSims = int(a.i("fast-sims", c.fastSims));
+    c.reuseTree = a.i("reuse-tree", 0) != 0;
     return c;
 }
 
