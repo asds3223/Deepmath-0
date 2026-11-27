@@ -83,6 +83,7 @@ static TrainConfig trainConfig(const Args& a) {
     c.valueW = float(a.f("vw", c.valueW));
     c.threads = int(a.i("threads", 4));
     c.warmup = int(a.i("warmup", c.warmup));
+    c.voBatch = int(a.i("vo-batch", 0));
     c.widthNorm = a.i("width-norm", 1) != 0;
     c.latestGrowthHidScale = float(a.f("new-hid-scale", 0.0));
     c.valueHidScale = float(a.f("value-hid-scale", 0.0));
@@ -405,7 +406,7 @@ static int cmdTest(const Args&) {
         float worst = 0;
         for (int s = 0; s < 10; ++s) {
             std::vector<float> before = wide.w;
-            tr.step(wide, {{&d, 0}});
+            tr.step(wide, std::vector<Trainer::Item>{{&d, 0, false}});
             for (size_t i = 0; i < wide.L.TOTAL; ++i) if (!isOld[i]) worst = std::max(worst, std::fabs(wide.w[i] - before[i]) / cfg.lr);
         }
         bool ok = worst < 0.02f;   // 10 steps of warm-up 1/1000..10/1000 with |m̂/√v̂| ≈ 1
@@ -480,6 +481,34 @@ static int cmdTest(const Args&) {
         bool ok2 = gs.plies > 0 && d.size() > 0;
         fails += !ok2;
         std::printf("self-play with PCR + tree reuse: %d plies, %zu samples, %lld sims %s\n", gs.plies, d.size(), (long long)gs.sims, ok2 ? "OK" : "FAIL");
+    }
+    // P7 value-only samples: adding them must not change the policy-head gradient of a step
+    {
+        Net net;
+        net.init(61);
+        net.prepareInference();
+        Searcher S(&net, 9);
+        SelfplayConfig sc;
+        sc.sp.sims = 120; sc.sp.noise = true; sc.pFull = 0.25f; sc.fastSims = 30; sc.fastValue = true; sc.maxPlies = 80;
+        Dataset d;
+        playSelfplayGame(S, sc, d);
+        size_t nvo = 0, npol = 0;
+        for (auto& h : d.s) { nvo += (h.flags & 2) != 0; npol += !(h.flags & 2); }
+        TrainConfig cfg;
+        cfg.threads = 1;
+        std::vector<Trainer::Item> a1, a2;
+        for (size_t i = 0; i < d.size(); ++i) if (!(d.s[i].flags & 2)) a1.push_back({&d, i, false});
+        a2 = a1;
+        for (size_t i = 0; i < d.size(); ++i) if (d.s[i].flags & 2) a2.push_back({&d, i, true});
+        Trainer t1(cfg, net.L.TOTAL), t2(cfg, net.L.TOTAL);
+        Net n1 = net, n2 = net;
+        t1.step(n1, a1);
+        t2.step(n2, a2);
+        float polDiff = 0;
+        for (size_t i = net.L.PM; i < net.L.TOTAL; ++i) polDiff = std::max(polDiff, std::fabs(t1.m[i] - t2.m[i]));
+        bool ok = nvo > 0 && npol > 0 && polDiff < 1e-7f;
+        fails += !ok;
+        std::printf("value-only samples: %zu policy + %zu value-only, policy-output moment diff %.1e %s\n", npol, nvo, polDiff, ok ? "OK" : "FAIL");
     }
     // Solver: mate in one must be found and proven
     {
@@ -604,6 +633,7 @@ static SelfplayConfig selfplayConfig(const Args& a) {
     c.pFull = float(a.f("pcr-full", c.pFull));
     c.fastSims = int(a.i("fast-sims", c.fastSims));
     c.reuseTree = a.i("reuse-tree", 0) != 0;
+    c.fastValue = a.i("fast-value", 0) != 0;
     return c;
 }
 
@@ -797,7 +827,9 @@ static int cmdLoop(const Args& a) {
         while (int(win.size()) > window) win.pop_front();
         std::vector<const Dataset*> wp;
         for (auto& x : win) wp.push_back(&x);
-        int steps = std::max(1, int(reuse * double(win.back().size()) / tc.batch));
+        size_t nPolNew = 0;
+        for (auto& h : win.back().s) nPolNew += !(h.flags & 2);
+        int steps = std::max(1, int(reuse * double(nPolNew) / tc.batch));   // policy samples set the step count
         std::mt19937_64 rng(uint64_t(gen) * 31337);
         auto t0 = Clock::now();
         auto st = tr.train(net, wp, steps, rng, logSteps, [&](int done, const LossStats& r) {

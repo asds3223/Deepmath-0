@@ -10,7 +10,7 @@ struct SampleHdr {
     uint8_t board[64];
     uint8_t stm, castle;
     int8_t result;      // game result from stm's view: +1 win, 0 draw, -1 loss
-    uint8_t flags;      // bit0: game hit the ply cap
+    uint8_t flags;      // bit0: game hit the ply cap; bit1: value-only sample (fast search, no policy target)
     float root[3];      // root WDL from search (stm view)
     uint32_t off;
     uint16_t n, pad;
@@ -71,6 +71,7 @@ struct SelfplayConfig {
     float pFull = 1.f;
     int fastSims = 200;
     bool reuseTree = false;   // P7 tree reuse between moves (Lc0/KataGo); sims = total root visits
+    bool fastValue = false;   // P7: record fast-search positions as value-only samples (z + fast root WDL)
 };
 
 struct GameStats {
@@ -125,6 +126,17 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
             if (!full) { S.sp.sims = cfg.fastSims; S.sp.noise = false; }
             gs.sims += S.search(pos, hist, cfg.reuseTree);
             if (full) recordSample(S, pos, out);
+            else if (cfg.fastValue) {
+                SampleHdr h{};
+                std::memcpy(h.board, pos.sq, 64);
+                h.stm = pos.stm;
+                h.castle = pos.castle;
+                S.rootWDL(h.root);
+                h.off = uint32_t(out.mv.size());
+                h.n = 0;
+                h.flags = 2;
+                out.s.push_back(h);
+            }
             m = S.pickMove(ply < cfg.tempPlies ? 1.f : 0.f);
             if (allowResign) {
                 float wdl[3];
@@ -141,7 +153,7 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
     gs.plies = ply;
     for (size_t i = first; i < out.s.size(); ++i) {
         out.s[i].result = int8_t(out.s[i].stm == WHITE ? gs.result : -gs.result);
-        out.s[i].flags = gs.capped ? 1 : 0;
+        out.s[i].flags = uint8_t((out.s[i].flags & 2) | (gs.capped ? 1 : 0));
     }
     return gs;
 }

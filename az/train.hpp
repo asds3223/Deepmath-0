@@ -13,6 +13,7 @@ struct TrainConfig {
     float lambda = 0.3f;   // P4: value target = (1-λ)·result + λ·root WDL
     int threads = 4;
     int warmup = 1000;     // per-parameter LR warm-up (steps since the parameter was created or reset)
+    int voBatch = 0;       // value-only samples added to each step (P7); value gradient is then averaged over all samples
     bool widthNorm = true; // μP-style LR scaling for layers whose fan-in grew (P6)
     float valueHidScale = 0.f;          // >0: value hidden layer (V1) width factor override (gen-1121 decision, THEORY P6)
     float latestGrowthHidScale = 0.f;   // >0: hidden-layer weights created at the LATEST growth use this width factor
@@ -30,8 +31,9 @@ struct LossStats {
 };
 
 // Accumulates d(loss)/d(w) for one sample into g (not divided by batch). Returns per-sample stats in st.
+// vScale multiplies the value-loss gradient (value-only samples, P7 fast-search value data).
 inline void sampleGrad(const Net& net, const SampleHdr& h, const uint32_t* mv, float* g, LossStats& st,
-                       const TrainConfig& cfg) {
+                       const TrainConfig& cfg, float vScale = 1.f) {
     const float* w = net.w.data();
     const Layout& L = net.L;
     const int H = net.d.H, HV = net.d.HV, HP = net.d.HP;
@@ -67,7 +69,7 @@ inline void sampleGrad(const Net& net, const SampleHdr& h, const uint32_t* mv, f
     for (int k = 0; k < 3; ++k) {
         tv[k] = (1 - cfg.lambda) * res[k] + cfg.lambda * h.root[k];
         st.val -= tv[k] > 0 ? tv[k] * std::log(std::max(out[k], 1e-12f)) : 0.f;
-        dout[k] = (out[k] - tv[k]) * cfg.valueW;
+        dout[k] = (out[k] - tv[k]) * cfg.valueW * vScale;
         g[L.V2B + k] += dout[k];
         for (int j = 0; j < HV; ++j) {
             g[L.V2W + size_t(k) * HV + j] += dout[k] * hv[j];
@@ -183,8 +185,20 @@ struct Trainer {
         born.swap(b2);
     }
 
-    // One optimizer step on a batch of (dataset, sample) indices.
+    struct Item { const Dataset* d; size_t i; bool valueOnly; };
+    // One optimizer step on a batch of (dataset, sample) indices (all policy+value samples).
     LossStats step(Net& net, const std::vector<std::pair<const Dataset*, size_t>>& batch) {
+        std::vector<Item> items;
+        items.reserve(batch.size());
+        for (auto& b : batch) items.push_back({b.first, b.second, false});
+        return step(net, items);
+    }
+    // Policy gradient = mean over policy samples (as before); value gradient = mean over ALL samples.
+    LossStats step(Net& net, const std::vector<Item>& batch) {
+        size_t nPol = 0;
+        for (auto& it : batch) nPol += !it.valueOnly;
+        nPol = std::max<size_t>(1, nPol);
+        const float vScale = float(nPol) / float(batch.size());
         int T = std::max(1, cfg.threads);
         grads.resize(T);
         std::vector<LossStats> st(T);
@@ -193,10 +207,11 @@ struct Trainer {
             th.emplace_back([&, ti] {
                 auto& g = grads[ti];
                 g.assign(net.L.TOTAL, 0.f);
+                LossStats dummy;
                 for (size_t b = ti; b < batch.size(); b += T) {
-                    const Dataset& d = *batch[b].first;
-                    const SampleHdr& h = d.s[batch[b].second];
-                    sampleGrad(net, h, &d.mv[h.off], g.data(), st[ti], cfg);
+                    const Dataset& d = *batch[b].d;
+                    const SampleHdr& h = d.s[batch[b].i];
+                    sampleGrad(net, h, &d.mv[h.off], g.data(), batch[b].valueOnly ? dummy : st[ti], cfg, vScale);
                 }
             });
         }
@@ -205,7 +220,7 @@ struct Trainer {
         for (auto& s : st) tot.add(s);
         // AdamW (decoupled weight decay)
         ++t;
-        const float inv = 1.f / float(batch.size());
+        const float inv = 1.f / float(nPol);
         // Per-parameter bias correction and warm-up, from each parameter's own step count k = t - born.
         constexpr int K = 20000;   // beyond this, beta^k < 3e-9 → corrections are 1
         static std::vector<float> p1, p2;
@@ -251,19 +266,20 @@ struct Trainer {
     // onLog(stepsDone, statsSinceLastLog) is called every `logEvery` steps and at the end (if logEvery > 0).
     LossStats train(Net& net, const std::vector<const Dataset*>& window, int steps, std::mt19937_64& rng, int logEvery = 0,
                     const std::function<void(int, const LossStats&)>& onLog = {}) {
-        std::vector<size_t> cum;
-        size_t total = 0;
-        for (auto* d : window) { total += d->size(); cum.push_back(total); }
+        // Pools: policy+value samples (n > 0) and value-only samples (flags bit1, n == 0).
+        std::vector<std::pair<const Dataset*, uint32_t>> pol, vo;
+        for (auto* d : window)
+            for (size_t i = 0; i < d->size(); ++i) ((d->s[i].flags & 2) ? vo : pol).push_back({d, uint32_t(i)});
         LossStats all;
-        if (!total) return all;
-        std::uniform_int_distribution<size_t> U(0, total - 1);
-        std::vector<std::pair<const Dataset*, size_t>> batch(size_t(cfg.batch));
+        if (pol.empty()) return all;
+        std::uniform_int_distribution<size_t> U(0, pol.size() - 1), V(0, vo.empty() ? 0 : vo.size() - 1);
+        const size_t nVo = vo.empty() ? 0 : size_t(std::max(0, cfg.voBatch));
+        std::vector<Item> batch(size_t(cfg.batch) + nVo);
         LossStats recent;
         for (int s = 0; s < steps; ++s) {
-            for (auto& b : batch) {
-                size_t x = U(rng);
-                size_t di = size_t(std::upper_bound(cum.begin(), cum.end(), x) - cum.begin());
-                b = {window[di], x - (di ? cum[di - 1] : 0)};
+            for (size_t k = 0; k < batch.size(); ++k) {
+                if (k < size_t(cfg.batch)) { auto& e = pol[U(rng)]; batch[k] = {e.first, e.second, false}; }
+                else { auto& e = vo[V(rng)]; batch[k] = {e.first, e.second, true}; }
             }
             LossStats st = step(net, batch);
             all.add(st);
