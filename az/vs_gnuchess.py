@@ -14,6 +14,14 @@ OPENINGS = [  # 10 common lines (UCI), balanced and varied
     "e2e4 e7e5 g1f3 b8c6", "d2d4 d7d5 c2c4 e7e6", "e2e4 c7c5 g1f3 d7d6", "d2d4 g8f6 c2c4 g7g6",
     "e2e4 e7e6 d2d4 d7d5", "c2c4 e7e5 b1c3 g8f6", "g1f3 d7d5 g2g3 g8f6", "e2e4 c7c6 d2d4 d7d5",
     "d2d4 g8f6 c2c4 e7e6", "e2e4 e7e5 f1c4 g8f6",
+    "e2e4 c7c5 b1c3 b8c6", "d2d4 d7d5 g1f3 g8f6", "c2c4 g8f6 b1c3 e7e6", "e2e4 d7d6 d2d4 g8f6", "d2d4 f7f5 g2g3 g8f6",
+    "e2e4 e7e5 g1f3 g8f6", "e2e4 c7c5 c2c3 g8f6", "d2d4 d7d5 c2c4 c7c6", "g1f3 g8f6 c2c4 g7g6", "e2e4 g7g6 d2d4 f8g7",
+    "e2e4 e7e6 d2d4 d7d5 b1c3 f8b4", "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5", "d2d4 g8f6 c2c4 c7c5", "e2e4 b8c6 d2d4 d7d5",
+    "c2c4 c7c5 g1f3 b8c6", "d2d4 e7e6 c2c4 f8b4", "e2e4 e7e5 b1c3 g8f6", "b2b3 e7e5 c1b2 b8c6", "g2g3 d7d5 f1g2 g8f6",
+    "e2e4 d7d5 e4d5 d8d5", "d2d4 g8f6 g1f3 g7g6", "e2e4 c7c5 g1f3 e7e6", "c2c4 e7e6 b1c3 d7d5", "d2d4 d7d5 c1f4 g8f6",
+    "e2e4 e7e5 g1f3 d7d6", "e2e4 g8f6 e4e5 f6d5", "d2d4 c7c5 d4d5 e7e5", "f2f4 d7d5 g1f3 g8f6", "e2e4 c7c5 g1f3 b8c6",
+    "d2d4 g8f6 c2c4 b7b6", "e2e4 e7e5 d2d4 e5d4", "c2c4 g7g6 b1c3 f8g7", "d2d4 d7d6 e2e4 g8f6", "e2e4 c7c6 b1c3 d7d5",
+    "g1f3 c7c5 c2c4 g8f6", "d2d4 g8f6 c1g5 e7e6", "e2e4 e7e6 d2d3 d7d5", "e2e4 c7c5 d2d4 c5d4", "a2a3 e7e5 c2c4 g8f6",
 ]
 
 
