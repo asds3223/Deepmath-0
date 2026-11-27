@@ -350,6 +350,28 @@ static int cmdTest(const Args&) {
         fails += !ok;
         std::printf("widen 128x32x32 -> 256x64x64: output max |diff| %.2e, param map %s %s\n", maxErr, mapOk ? "exact" : "BROKEN",
                     ok ? "OK" : "FAIL");
+        {
+            Net w2;
+            widenNet(wide, Dims{1024, 128, 128}, w2, 6);
+            Net w1;
+            widenNet(net, Dims{512, 128, 128}, w1, 6);
+            Net w3;
+            widenNet(w1, Dims{1024, 128, 128}, w3, 7);
+            float e2 = 0;
+            Position p;
+            p.setFen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3");
+            Move ms[MAX_MOVES];
+            int n = genLegal(p, ms);
+            Acc a1, a3;
+            float p1[MAX_MOVES], p3[MAX_MOVES], wd1[3], wd3[3];
+            refreshAcc(w1, p, a1); refreshAcc(w3, p, a3);
+            evaluate(w1, a1, p.stm, ms, n, p1, wd1); evaluate(w3, a3, p.stm, ms, n, p3, wd3);
+            for (int k = 0; k < 3; ++k) e2 = std::max(e2, std::fabs(wd1[k] - wd3[k]));
+            for (int i = 0; i < n; ++i) e2 = std::max(e2, std::fabs(p1[i] - p3[i]));
+            bool ok3 = e2 < 1e-5f && w3.d.H == 1024;
+            fails += !ok3;
+            std::printf("widen 512x128x128 -> 1024x128x128: output max |diff| %.2e %s\n", e2, ok3 ? "OK" : "FAIL");
+        }
         Net back;
         bool rt = wide.save("/tmp/az_widen_test.bin") && back.load("/tmp/az_widen_test.bin") && back.d == wide.d && back.w == wide.w;
         fails += !rt;
@@ -389,7 +411,7 @@ static int cmdTest(const Args&) {
         std::printf("optimizer after widening: max new-param step %.4f x lr over 10 steps (limit 0.02) %s\n", worst, ok ? "OK" : "FAIL");
     }
     // P7: sparse fused inference must match the reference forward pass
-    for (Dims gd : {Dims{128, 32, 32}, Dims{512, 128, 128}}) {
+    for (Dims gd : {Dims{128, 32, 32}, Dims{512, 128, 128}, Dims{1024, 128, 128}}) {
         Net net;
         net.setDims(gd);
         net.init(41);

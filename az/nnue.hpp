@@ -13,7 +13,7 @@ namespace az {
 constexpr int NF = 772;            // 2 (own/opp) x 6 pieces x 64 squares + 4 castling rights
 constexpr int NPOL = 4096 + 72;    // policy move indices
 constexpr int MAX_FEAT = 40;
-constexpr int HMAX = 512, HVMAX = 128, HPMAX = 128;   // largest widths a stage may grow to (P6)
+constexpr int HMAX = 1024, HVMAX = 128, HPMAX = 128;   // largest widths a stage may grow to (P6)
 
 // Widths are runtime values so one lineage can grow in stages (P6). Stage 1 = 128 / 32 / 32.
 struct Dims {
