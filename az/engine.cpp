@@ -76,14 +76,72 @@ public:
         nodes.resize(nodeN);
     }
 
+    bool haveTree = false;
+    int64_t reusedVisits = 0;
+
+    // Tree reuse between moves: if p is reached from the previous root by 1 or 2 plies that are in the tree,
+    // keep that subtree (compacted). Returns true when the tree was kept.
+    bool reuse(const Position& p) {
+        if (!haveTree || nodes[0].first < 0) return false;
+        int cur = 0;
+        Position q = root;
+        for (int depth = 0; depth < 2 && q.key != p.key; ++depth) {
+            const PNode& nd = nodes[cur];
+            if (nd.first < 0) return false;
+            int found = -1;
+            for (int k = 0; k < nd.nch && found < 0; ++k) {
+                Position t = q;
+                t.make(nodes[nd.first + k].move);
+                if (t.key == p.key || (depth == 0 && nodes[nd.first + k].first >= 0)) {
+                    // depth 0: try each expanded child for a 2-ply match
+                    if (t.key == p.key) { found = nd.first + k; q = t; }
+                    else {
+                        const PNode& c = nodes[nd.first + k];
+                        for (int j = 0; j < c.nch; ++j) {
+                            Position u = t;
+                            u.make(nodes[c.first + j].move);
+                            if (u.key == p.key) { found = c.first + j; q = u; break; }
+                        }
+                    }
+                }
+            }
+            if (found < 0) return false;
+            cur = found;
+        }
+        if (q.key != p.key || cur == 0 || nodes[cur].first < 0 || nodes[cur].proven != UNKNOWN) return false;
+        std::vector<PNode> nn;
+        std::vector<Acc> na;
+        std::vector<int> from;
+        nn.push_back(nodes[cur]);
+        from.push_back(cur);
+        for (size_t i = 0; i < nn.size(); ++i) {
+            const PNode& o = nodes[from[i]];
+            if (o.acc >= 0) { na.push_back(accs[o.acc]); nn[i].acc = int32_t(na.size() - 1); }
+            if (o.first >= 0) {
+                nn[i].first = int32_t(nn.size());
+                for (int k = 0; k < o.nch; ++k) { nn.push_back(nodes[o.first + k]); from.push_back(o.first + k); }
+            }
+        }
+        if (nn.size() > nodes.size() || na.size() > accs.size()) return false;
+        std::copy(nn.begin(), nn.end(), nodes.begin());
+        std::copy(na.begin(), na.end(), accs.begin());
+        nNodes = nn.size();
+        nAccs = na.size();
+        return true;
+    }
+
     void prepare(const Position& p, const std::vector<u64>& hist) {
+        bool kept = reuse(p);
+        haveTree = true;
         root = p;
         gameHist = hist;
+        sims = 0;
+        stop = false;
+        reusedVisits = kept ? nodes[0].N - 1 : 0;
+        if (kept) return;
         nNodes = 1;
         nAccs = 0;
         nodes[0] = PNode{};
-        sims = 0;
-        stop = false;
         Move ms[MAX_MOVES];
         int n = genLegal(p, ms);
         int ai = int(nAccs++);
@@ -357,6 +415,7 @@ struct Engine {
         int64_t maxSims = nodes > 0 ? nodes : fixedNodes;
         if (!infinite && budget < 0 && maxSims <= 0) maxSims = 1000;   // bare "go": 1,000 playouts
         S.prepare(pos, hist);
+        if (S.reusedVisits > 0) std::cout << "info string reused " << S.reusedVisits << " visits" << std::endl;
         searchThread = std::thread([this, budget, maxSims, infinite] {
             auto t0 = Clock::now();
             auto deadline = t0 + std::chrono::milliseconds(std::max<int64_t>(budget, 0));
@@ -405,7 +464,7 @@ struct Engine {
                     else if (inValue) value += (value.empty() ? "" : " ") + tok;
                 }
                 try {
-                    if (name == "Hash") { hashMB = std::stoi(value); S.setHash(size_t(hashMB)); }
+                    if (name == "Hash") { hashMB = std::stoi(value); S.setHash(size_t(hashMB)); S.haveTree = false; }
                     else if (name == "Threads") threads = std::clamp(std::stoi(value), 1, 256);
                     else if (name == "MoveOverhead") overhead = std::stoll(value);
                     else if (name == "MoveTime") fixedMoveTime = std::stoll(value);
@@ -415,6 +474,7 @@ struct Engine {
                         if (value == "<embedded>" ? loadNetMem(n2, az_net_blob, size_t(az_net_blob_end - az_net_blob)) : n2.load(value)) {
                             net = std::move(n2);
                             net.prepareInference();
+                            S.haveTree = false;
                             evalFile = value;
                             std::cout << "info string loaded net " << net.d.str() << std::endl;
                         } else std::cout << "info string cannot load " << value << std::endl;

@@ -154,6 +154,10 @@ az/build_engine.sh [NET.bin]     # 기본: data/az_run1 의 최신 net_XXXX.bin
   - 설치: DroidFish 의 "Manage chess engines → Install engine" (또는 `/sdcard/DroidFish/uci/` 에 복사). UCI 엔진 파일을 받는 다른 GUI 도 같다.
   - 검증: qemu-aarch64 에서 UCI 시험을 통과했다 (movetime 2000 → 1.97 s, 메이트 1수, 시계 대국).
     `go nodes 3000` 결과가 x86 빌드와 완전히 같다 (노드 수, 점수, 수순 6수). 실제 안드로이드 기기에서는 실행하지 않았다.
+- **2026-11-27 갱신 (869세대 망):** P7 희소 융합 은닉층(평가 약 1.9배)과 수 사이 트리 재사용을 넣었다.
+  GUI 가 보낸 새 국면이 이전 뿌리에서 1~2 ply 아래이고 그 수들이 트리에 있으면, 그 부분 트리를 남긴다 (`info string reused N visits`).
+  자기 대국 105수 시험에서 103수에 재사용됐다 (수당 150 ms, 평균 1.2만 방문 재사용). 모든 수가 합법이었고 메이트 1수 시험도 통과했다.
+  `ucinewgame`, Hash 변경, EvalFile 변경 때는 트리를 버린다. `go nodes N` 의 N 은 새로 하는 시뮬 수이다.
 - **속도 참고 (512×128×128 망, 학습과 CPU 를 나눠 쓰는 상태):** 1 스레드 약 1.8만 시뮬/초, 4 스레드 약 3만 시뮬/초.
 
 ## 6. 실행 예
