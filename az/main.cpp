@@ -85,6 +85,7 @@ static TrainConfig trainConfig(const Args& a) {
     c.warmup = int(a.i("warmup", c.warmup));
     c.widthNorm = a.i("width-norm", 1) != 0;
     c.latestGrowthHidScale = float(a.f("new-hid-scale", 0.0));
+    c.valueHidScale = float(a.f("value-hid-scale", 0.0));
     return c;
 }
 static bool loadNet(Net& n, const std::string& path, uint64_t seed) {
@@ -671,8 +672,9 @@ static int cmdEvalLoss(const Args& a) {
         size_t n = std::min(limit, d.size()), stride = std::max<size_t>(1, d.size() / std::max<size_t>(1, n));
         for (size_t i = 0; i < d.size() && st.n < int64_t(n); i += stride) sampleGrad(net, d.s[i], &d.mv[d.s[i].off], scratch.data(), st, cfg);
         double k = std::max<int64_t>(1, st.n);
-        std::printf("%-40s n %6lld  policy CE %.4f KL %.4f  value CE %.4f  top1 %.1f%%\n", path.c_str(), (long long)st.n, st.pol / k,
-                    (st.pol - st.polTargetEnt) / k, st.val / k, 100.0 * st.top1 / k);
+        std::printf("%-40s n %6lld  policy CE %.4f KL %.4f  value CE %.4f  top1 %.1f%%  value MSE(z) %.4f  sign acc %.1f%%\n", path.c_str(),
+                    (long long)st.n, st.pol / k, (st.pol - st.polTargetEnt) / k, st.val / k, 100.0 * st.top1 / k, st.valMse / k,
+                    100.0 * st.valSign / std::max(1.0, st.decisive));
     }
     return 0;
 }

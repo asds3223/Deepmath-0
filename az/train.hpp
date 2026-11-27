@@ -14,14 +14,19 @@ struct TrainConfig {
     int threads = 4;
     int warmup = 1000;     // per-parameter LR warm-up (steps since the parameter was created or reset)
     bool widthNorm = true; // μP-style LR scaling for layers whose fan-in grew (P6)
+    float valueHidScale = 0.f;          // >0: value hidden layer (V1) width factor override (gen-1121 decision, THEORY P6)
     float latestGrowthHidScale = 0.f;   // >0: hidden-layer weights created at the LATEST growth use this width factor
                                         // instead of 256/2H (gen-1100 pre-registered rule, THEORY P6)
 };
 
 struct LossStats {
     double pol = 0, val = 0, polTargetEnt = 0, top1 = 0;
+    double valMse = 0, valSign = 0, decisive = 0;   // value quality vs the game result z (target-entropy free)
     int64_t n = 0;
-    void add(const LossStats& o) { pol += o.pol; val += o.val; polTargetEnt += o.polTargetEnt; top1 += o.top1; n += o.n; }
+    void add(const LossStats& o) {
+        pol += o.pol; val += o.val; polTargetEnt += o.polTargetEnt; top1 += o.top1; n += o.n;
+        valMse += o.valMse; valSign += o.valSign; decisive += o.decisive;
+    }
 };
 
 // Accumulates d(loss)/d(w) for one sample into g (not divided by batch). Returns per-sample stats in st.
@@ -53,6 +58,11 @@ inline void sampleGrad(const Net& net, const SampleHdr& h, const uint32_t* mv, f
     for (int k = 0; k < 3; ++k) out[k] = w[L.V2B + k] + dot(&w[L.V2W + size_t(k) * HV], hv, HV);
     softmaxInPlace(out, 3);
     float res[3] = {h.result > 0 ? 1.f : 0.f, h.result == 0 ? 1.f : 0.f, h.result < 0 ? 1.f : 0.f};
+    {
+        float q = out[0] - out[2], zr = float(h.result);
+        st.valMse += (q - zr) * (q - zr);
+        if (h.result != 0) { st.decisive += 1; st.valSign += (q > 0) == (h.result > 0); }
+    }
     float tv[3], dout[3];
     for (int k = 0; k < 3; ++k) {
         tv[k] = (1 - cfg.lambda) * res[k] + cfg.lambda * h.root[k];
@@ -208,7 +218,8 @@ struct Trainer {
         const Layout& L = net.L;
         const float sHid = cfg.widthNorm ? 256.f / float(2 * net.d.H) : 1.f;
         const float sV = cfg.widthNorm ? 32.f / float(net.d.HV) : 1.f, sP = cfg.widthNorm ? 32.f / float(net.d.HP) : 1.f;
-        const std::pair<size_t, float> ranges[] = {{L.V1W, 1.f}, {L.V1B, sHid}, {L.V2W, 1.f}, {L.V2B, sV}, {L.P1W, 1.f},
+        const float sVHid = cfg.valueHidScale > 0.f ? cfg.valueHidScale : sHid;
+        const std::pair<size_t, float> ranges[] = {{L.V1W, 1.f}, {L.V1B, sVHid}, {L.V2W, 1.f}, {L.V2B, sV}, {L.P1W, 1.f},
                                                    {L.P1B, sHid}, {L.PM, 1.f}, {L.PB, sP}, {L.TOTAL, 1.f}};
         float* w = net.w.data();
         size_t ri = 0;
