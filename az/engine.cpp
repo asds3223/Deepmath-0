@@ -297,6 +297,7 @@ struct Engine {
 
     Engine() {
         if (!loadNetMem(net, az_net_blob, size_t(az_net_blob_end - az_net_blob))) { std::cout << "info string embedded net invalid" << std::endl; std::exit(1); }
+        net.prepareInference();
         S.net = &net;
         S.setHash(size_t(hashMB));
         pos.setStart();
@@ -413,6 +414,7 @@ struct Engine {
                         Net n2;
                         if (value == "<embedded>" ? loadNetMem(n2, az_net_blob, size_t(az_net_blob_end - az_net_blob)) : n2.load(value)) {
                             net = std::move(n2);
+                            net.prepareInference();
                             evalFile = value;
                             std::cout << "info string loaded net " << net.d.str() << std::endl;
                         } else std::cout << "info string cannot load " << value << std::endl;

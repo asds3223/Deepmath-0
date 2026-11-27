@@ -102,6 +102,7 @@ struct SelfplaySummary {
 
 static SelfplaySummary runSelfplay(const Net& net, const SelfplayConfig& cfg, int games, int threads, uint64_t seed,
                                    Dataset& out, int logEvery, const std::string& tag) {
+    net.prepareInference();
     SelfplaySummary sum;
     std::atomic<int> next{0};
     std::mutex mu;
@@ -163,6 +164,8 @@ struct ArenaResult {
 // `pairs` openings, each played twice with colors swapped. nullptr = random mover.
 static ArenaResult runArena(const Net* A, const Net* B, const SearchParams& sp, int pairs, int threads, uint64_t seed,
                             int openingPlies, bool progress, const std::string& tag = "") {
+    if (A) A->prepareInference();
+    if (B) B->prepareInference();
     ArenaResult r;
     std::atomic<int> next{0};
     std::mutex mu;
@@ -385,6 +388,37 @@ static int cmdTest(const Args&) {
         fails += !ok;
         std::printf("optimizer after widening: max new-param step %.4f x lr over 10 steps (limit 0.02) %s\n", worst, ok ? "OK" : "FAIL");
     }
+    // P7: sparse fused inference must match the reference forward pass
+    for (Dims gd : {Dims{128, 32, 32}, Dims{512, 128, 128}}) {
+        Net net;
+        net.setDims(gd);
+        net.init(41);
+        for (size_t i = net.L.FTB; i < net.L.FTB + size_t(gd.H); ++i) net.w[i] = 0.3f;   // mix of zero / partial / saturated inputs
+        std::mt19937_64 rng(4);
+        float maxErr = 0;
+        for (int g = 0; g < 30; ++g) {
+            Position p;
+            p.setStart();
+            for (int ply = 0; ply < 60; ++ply) {
+                Move ms[MAX_MOVES];
+                int n = genLegal(p, ms);
+                if (!n) break;
+                Acc a1;
+                refreshAcc(net, p, a1);
+                float p1[MAX_MOVES], p2[MAX_MOVES], w1[3], w2[3];
+                net.inferReady = false;
+                evaluate(net, a1, p.stm, ms, n, p1, w1);
+                net.prepareInference();
+                evaluate(net, a1, p.stm, ms, n, p2, w2);
+                for (int k = 0; k < 3; ++k) maxErr = std::max(maxErr, std::fabs(w1[k] - w2[k]));
+                for (int i = 0; i < n; ++i) maxErr = std::max(maxErr, std::fabs(p1[i] - p2[i]));
+                p.make(ms[std::uniform_int_distribution<int>(0, n - 1)(rng)]);
+            }
+        }
+        bool ok = maxErr < 1e-4f;
+        fails += !ok;
+        std::printf("sparse fused inference %s vs reference: max |diff| %.2e %s\n", gd.str().c_str(), maxErr, ok ? "OK" : "FAIL");
+    }
     // Solver: mate in one must be found and proven
     {
         Net net;
@@ -466,7 +500,20 @@ static int cmdBench(const Args& a) {
     std::printf("eval (P1 incremental + P2 legal-sparse): %.2f us/eval\n", 1e6 * tInc / nEv);
     std::printf("eval (full refresh + dense output layer): %.2f us/eval\n", 1e6 * tFull / nEv);
     std::printf("speedup: %.2fx   (sink %.3f)\n", tFull / std::max(1e-9, tInc), sink);
-    // End-to-end MCTS speed
+    // End-to-end MCTS speed (P7 sparse fused hidden layer on)
+    net.prepareInference();
+    {
+        t0 = Clock::now();
+        for (int r = 0; r < reps; ++r)
+            for (auto& pr : pairs) {
+                refreshAcc(net, pr.before, parent);
+                updateAcc(net, parent, pr.before, pr.after, child);
+                evaluate(net, child, pr.after.stm, pr.moves.data(), int(pr.moves.size()), pri, wdl);
+                sink += pri[0] + wdl[0];
+            }
+        double tSparse = secsSince(t0) - tParent;
+        std::printf("eval (P1 + P2 + P7 sparse fused hidden): %.2f us/eval  (%.2fx vs P1+P2)\n", 1e6 * tSparse / nEv, tInc / std::max(1e-9, tSparse));
+    }
     Searcher S(&net, 1);
     S.sp = searchParams(a);
     const char* fens[] = {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -492,6 +539,8 @@ static SelfplayConfig selfplayConfig(const Args& a) {
     c.tempPlies = int(a.i("temp-plies", c.tempPlies));
     c.maxPlies = int(a.i("max-plies", c.maxPlies));
     c.resignQ = float(a.f("resign", c.resignQ));
+    c.pFull = float(a.f("pcr-full", c.pFull));
+    c.fastSims = int(a.i("fast-sims", c.fastSims));
     return c;
 }
 
@@ -774,6 +823,7 @@ static int cmdGo(const Args& a) {
     if (!loadNet(net, a.s("net", ""), 1)) return 1;
     Position p;
     if (!p.setFen(a.s("fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"))) { std::fprintf(stderr, "bad fen\n"); return 1; }
+    net.prepareInference();
     Searcher S(&net, 1);
     S.sp = searchParams(a);
     auto t0 = Clock::now();
@@ -795,6 +845,7 @@ static int cmdGo(const Args& a) {
 static int cmdUci(const Args& a) {
     Net net;
     if (!loadNet(net, a.s("net", ""), 1)) return 1;
+    net.prepareInference();
     Searcher S(&net, 1);
     SearchParams base = searchParams(a);
     Position pos;

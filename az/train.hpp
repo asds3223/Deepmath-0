@@ -225,6 +225,7 @@ struct Trainer {
             float mh = m[i] / bc1, vh = v[i] / bc2;
             w[i] -= warm * lr * (mh / (std::sqrt(vh) + cfg.eps) + cfg.wd * w[i]);
         }
+        net.inferReady = false;   // weights changed: the P7 inference cache is stale
         return tot;
     }
 

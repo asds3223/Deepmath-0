@@ -66,6 +66,10 @@ struct SelfplayConfig {
     int maxPlies = 512;        // AlphaZero pseudocode max_moves
     float resignQ = 0.f;       // 0 = never resign; otherwise resign when q < -resignQ twice in a row
     float noResignFrac = 0.1f; // fraction of games where resignation is disabled (calibration)
+    // P7 playout cap randomization (KataGo): with probability pFull a move gets the full search (sp.sims, root noise)
+    // and is recorded; otherwise a fast search (fastSims, no noise) only plays the move. pFull = 1 → plain AlphaZero.
+    float pFull = 1.f;
+    int fastSims = 200;
 };
 
 struct GameStats {
@@ -115,8 +119,11 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
         Move m;
         if (n == 1) m = ms[0];   // forced: no search, no sample
         else {
+            bool full = cfg.pFull >= 1.f || std::uniform_real_distribution<float>(0, 1)(S.rng) < cfg.pFull;
+            S.sp = cfg.sp;
+            if (!full) { S.sp.sims = cfg.fastSims; S.sp.noise = false; }
             gs.sims += S.search(pos, hist);
-            recordSample(S, pos, out);
+            if (full) recordSample(S, pos, out);
             m = S.pickMove(ply < cfg.tempPlies ? 1.f : 0.f);
             if (allowResign) {
                 float wdl[3];

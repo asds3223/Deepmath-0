@@ -77,8 +77,19 @@ struct Net {
     Dims d;
     Layout L{d};
     std::vector<float> w = std::vector<float>(L.TOTAL, 0.f);
+    // P7 inference cache: value+policy hidden weights fused and transposed, [2H][HV+HP] (rebuilt after weights change)
+    mutable std::vector<float> h1T;
+    mutable bool inferReady = false;
 
-    void setDims(Dims nd) { d = nd; L = Layout(nd); w.assign(L.TOTAL, 0.f); }
+    void setDims(Dims nd) { d = nd; L = Layout(nd); w.assign(L.TOTAL, 0.f); inferReady = false; }
+    // Call once after the weights change and before multi-threaded search (not thread-safe itself).
+    void prepareInference() const {
+        const int H2 = 2 * d.H, O = d.HV + d.HP;
+        h1T.assign(size_t(H2) * O, 0.f);
+        for (int o = 0; o < d.HV; ++o) for (int i = 0; i < H2; ++i) h1T[size_t(i) * O + o] = w[L.V1W + size_t(o) * H2 + i];
+        for (int o = 0; o < d.HP; ++o) for (int i = 0; i < H2; ++i) h1T[size_t(i) * O + d.HV + o] = w[L.P1W + size_t(o) * H2 + i];
+        inferReady = true;
+    }
     void init(uint64_t seed) {
         std::mt19937_64 rng(seed);
         auto fill = [&](size_t off, size_t n, float sd) {
@@ -91,6 +102,7 @@ struct Net {
         fill(L.V2W, 3 * size_t(d.HV), 0.05f);
         fill(L.P1W, size_t(d.HP) * 2 * d.H, std::sqrt(2.f / (2 * d.H)));
         fill(L.PM, size_t(NPOL) * d.HP, 0.05f);
+        inferReady = false;
     }
     bool save(const std::string& path) const {
         std::ofstream f(path, std::ios::binary);
@@ -117,6 +129,7 @@ struct Net {
         if (nd.H < 1 || nd.H > HMAX || nd.HV < 1 || nd.HV > HVMAX || nd.HP < 1 || nd.HP > HPMAX) return false;
         setDims(nd);
         f.read(reinterpret_cast<char*>(w.data()), std::streamsize(w.size() * sizeof(float)));
+        inferReady = false;
         return bool(f);
     }
 };
@@ -223,13 +236,31 @@ inline void evaluate(const Net& net, const Acc& a, int stm, const Move* moves, i
     const int H = net.d.H, HV = net.d.HV, HP = net.d.HP;
     alignas(64) float z[2 * HMAX];
     for (int j = 0; j < H; ++j) { z[j] = clamp01(a.v[stm][j]); z[H + j] = clamp01(a.v[stm ^ 1][j]); }
-    float hv[HVMAX];
-    for (int o = 0; o < HV; ++o) hv[o] = clamp01(w[L.V1B + o] + dot(&w[L.V1W + size_t(o) * 2 * H], z, 2 * H));
+    float hv[HVMAX], hp[HPMAX];
+    if (net.inferReady) {
+        // P7: sparse-input fused hidden layer — only rows of non-zero inputs (≈ 38% at 512 wide) are read,
+        // value and policy hidden units in one pass. Same function as below up to float summation order.
+        const int O = HV + HP;
+        alignas(64) float acc[HVMAX + HPMAX];
+        for (int o = 0; o < HV; ++o) acc[o] = w[L.V1B + o];
+        for (int o = 0; o < HP; ++o) acc[HV + o] = w[L.P1B + o];
+        const float* T = net.h1T.data();
+        for (int i = 0; i < 2 * H; ++i) {
+            const float zi = z[i];
+            if (zi == 0.f) continue;
+            const float* row = T + size_t(i) * O;
+#pragma omp simd
+            for (int o = 0; o < O; ++o) acc[o] += zi * row[o];
+        }
+        for (int o = 0; o < HV; ++o) hv[o] = clamp01(acc[o]);
+        for (int o = 0; o < HP; ++o) hp[o] = clamp01(acc[HV + o]);
+    } else {
+        for (int o = 0; o < HV; ++o) hv[o] = clamp01(w[L.V1B + o] + dot(&w[L.V1W + size_t(o) * 2 * H], z, 2 * H));
+        if (n) for (int o = 0; o < HP; ++o) hp[o] = clamp01(w[L.P1B + o] + dot(&w[L.P1W + size_t(o) * 2 * H], z, 2 * H));
+    }
     for (int k = 0; k < 3; ++k) wdl[k] = w[L.V2B + k] + dot(&w[L.V2W + size_t(k) * HV], hv, HV);
     softmaxInPlace(wdl, 3);
     if (!n) return;
-    float hp[HPMAX];
-    for (int o = 0; o < HP; ++o) hp[o] = clamp01(w[L.P1B + o] + dot(&w[L.P1W + size_t(o) * 2 * H], z, 2 * H));
     for (int i = 0; i < n; ++i) {
         int k = policyIndex(moves[i], stm);
         prior[i] = (w[L.PB + k] + dot(&w[L.PM + size_t(k) * HP], hp, HP)) / policyTemp;
