@@ -14,6 +14,8 @@ struct TrainConfig {
     int threads = 4;
     int warmup = 1000;     // per-parameter LR warm-up (steps since the parameter was created or reset)
     bool widthNorm = true; // μP-style LR scaling for layers whose fan-in grew (P6)
+    float latestGrowthHidScale = 0.f;   // >0: hidden-layer weights created at the LATEST growth use this width factor
+                                        // instead of 256/2H (gen-1100 pre-registered rule, THEORY P6)
 };
 
 struct LossStats {
@@ -210,9 +212,14 @@ struct Trainer {
                                                    {L.P1B, sHid}, {L.PM, 1.f}, {L.PB, sP}, {L.TOTAL, 1.f}};
         float* w = net.w.data();
         size_t ri = 0;
+        int64_t latestBorn = 0;
+        if (cfg.latestGrowthHidScale > 0.f) for (int64_t b : born) latestBorn = std::max(latestBorn, b);
         for (size_t i = 0; i < net.L.TOTAL; ++i) {
             while (i >= ranges[ri].first) ++ri;
-            const float lr = cfg.lr * ranges[ri].second;
+            float scale = ranges[ri].second;
+            if (latestBorn > 0 && born[i] == latestBorn && ((i >= L.V1W && i < L.V1B) || (i >= L.P1W && i < L.P1B)))
+                scale = cfg.latestGrowthHidScale;
+            const float lr = cfg.lr * scale;
             float gi = 0.f;
             for (int ti = 0; ti < T; ++ti) gi += grads[ti][i];
             gi *= inv;

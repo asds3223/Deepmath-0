@@ -84,6 +84,7 @@ static TrainConfig trainConfig(const Args& a) {
     c.threads = int(a.i("threads", 4));
     c.warmup = int(a.i("warmup", c.warmup));
     c.widthNorm = a.i("width-norm", 1) != 0;
+    c.latestGrowthHidScale = float(a.f("new-hid-scale", 0.0));
     return c;
 }
 static bool loadNet(Net& n, const std::string& path, uint64_t seed) {
