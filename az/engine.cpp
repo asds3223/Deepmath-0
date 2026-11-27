@@ -76,7 +76,7 @@ public:
         nodes.resize(nodeN);
     }
 
-    bool haveTree = false;
+    bool haveTree = false, allowReuse = true;
     int64_t reusedVisits = 0;
 
     // Tree reuse between moves: if p is reached from the previous root by 1 or 2 plies that are in the tree,
@@ -131,7 +131,7 @@ public:
     }
 
     void prepare(const Position& p, const std::vector<u64>& hist) {
-        bool kept = reuse(p);
+        bool kept = allowReuse && reuse(p);
         haveTree = true;
         root = p;
         gameHist = hist;
@@ -451,6 +451,7 @@ struct Engine {
                           << "option name MoveTime type spin default 0 min 0 max 3600000\n"
                           << "option name Nodes type spin default 0 min 0 max 2000000000\n"
                           << "option name EvalFile type string default <embedded>\n"
+                          << "option name TreeReuse type check default true\n"
                           << "uciok" << std::endl;
             } else if (cmd == "isready") std::cout << "readyok" << std::endl;
             else if (cmd == "setoption") {
@@ -469,6 +470,7 @@ struct Engine {
                     else if (name == "MoveOverhead") overhead = std::stoll(value);
                     else if (name == "MoveTime") fixedMoveTime = std::stoll(value);
                     else if (name == "Nodes") fixedNodes = std::stoll(value);
+                    else if (name == "TreeReuse") { S.allowReuse = value == "true"; S.haveTree = false; }
                     else if (name == "EvalFile") {
                         Net n2;
                         if (value == "<embedded>" ? loadNetMem(n2, az_net_blob, size_t(az_net_blob_end - az_net_blob)) : n2.load(value)) {

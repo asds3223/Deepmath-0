@@ -78,9 +78,10 @@ def main():
     ap.add_argument("--gnu-st", type=int, default=0)
     ap.add_argument("--pairs", type=int, default=10)
     ap.add_argument("--evalfile", default="")
+    ap.add_argument("--tree-reuse", type=int, default=0, help="engine TreeReuse option (0 keeps the benchmark comparable to pre-reuse runs)")
     a = ap.parse_args()
     az = chess.engine.SimpleEngine.popen_uci([a.engine])
-    opts = {"Threads": 1, "Hash": 128}
+    opts = {"Threads": 1, "Hash": 128, "TreeReuse": bool(a.tree_reuse)}
     if a.evalfile:
         opts["EvalFile"] = a.evalfile
     az.configure(opts)
