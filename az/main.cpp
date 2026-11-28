@@ -166,7 +166,9 @@ struct ArenaResult {
 
 // `pairs` openings, each played twice with colors swapped. nullptr = random mover.
 static ArenaResult runArena(const Net* A, const Net* B, const SearchParams& sp, int pairs, int threads, uint64_t seed,
-                            int openingPlies, bool progress, const std::string& tag = "") {
+                            int openingPlies, bool progress, const std::string& tag = "", const SearchParams* spBp = nullptr) {
+    const SearchParams& spA = sp;
+    const SearchParams& spB = spBp ? *spBp : sp;
     if (A) A->prepareInference();
     if (B) B->prepareInference();
     ArenaResult r;
@@ -182,8 +184,9 @@ static ArenaResult runArena(const Net* A, const Net* B, const SearchParams& sp, 
                 if (pi >= pairs) break;
                 std::mt19937_64 rng(seed * 1000003 + uint64_t(pi));
                 auto op = randomOpening(openingPlies, rng);
-                int g1 = playMatchGame(sa, sb, sp, op, rng);    // A white
-                int g2 = -playMatchGame(sb, sa, sp, op, rng);   // A black
+                SearchParams pA = spA, pB = spB;
+                int g1 = playMatchGame(sa, sb, pA, op, rng, 512, nullptr, &pB);    // A white (A params), B black (B params)
+                int g2 = -playMatchGame(sb, sa, pB, op, rng, 512, nullptr, &pA);   // B white, A black
                 std::lock_guard<std::mutex> lk(mu);
                 for (int g : {g1, g2}) (g > 0 ? r.w : g < 0 ? r.l : r.d)++;
                 if (progress)
@@ -738,8 +741,13 @@ static int cmdArena(const Args& a) {
     bool bRandom = a.s("b", "") == "random";
     if (!bRandom && !loadNet(nb, a.s("b", ""), 2)) return 1;
     SearchParams sp = searchParams(a);
+    SearchParams spB = sp;   // --b-cinit / --b-fpu / --b-ptemp / --b-sims: search-setting A/B with the same or another net
+    spB.cInit = float(a.f("b-cinit", sp.cInit));
+    spB.fpuRed = float(a.f("b-fpu", sp.fpuRed));
+    spB.policyTemp = float(a.f("b-ptemp", sp.policyTemp));
+    spB.sims = int(a.i("b-sims", sp.sims));
     auto r = runArena(&na, bRandom ? nullptr : &nb, sp, int(a.i("pairs", 50)), int(a.i("threads", 4)), uint64_t(a.i("seed", 1)),
-                      int(a.i("opening-plies", 4)), true);
+                      int(a.i("opening-plies", 4)), true, "", &spB);
     std::printf("A vs B: +%d =%d -%d  score %.1f%%  Elo %+.0f ± %.0f\n", r.w, r.d, r.l, 100 * r.score(), ArenaResult::elo(r.score()),
                 r.eloCI95());
     return 0;

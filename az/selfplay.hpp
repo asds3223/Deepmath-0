@@ -159,8 +159,9 @@ inline GameStats playSelfplayGame(Searcher& S, const SelfplayConfig& cfg, Datase
 }
 
 // Match game. net == nullptr → uniformly random legal mover. Returns result from White's view.
+// spB (optional) gives Black's searcher its own search parameters (A/B tests of search settings with one net).
 inline int playMatchGame(Searcher& sw, Searcher& sb, const SearchParams& sp, const std::vector<Move>& opening,
-                         std::mt19937_64& rng, int maxPlies = 512, int* pliesOut = nullptr) {
+                         std::mt19937_64& rng, int maxPlies = 512, int* pliesOut = nullptr, const SearchParams* spB = nullptr) {
     Position pos;
     pos.setStart();
     std::vector<u64> hist;
@@ -177,7 +178,7 @@ inline int playMatchGame(Searcher& sw, Searcher& sb, const SearchParams& sp, con
         if (n == 1) m = ms[0];
         else if (!S.net) m = ms[std::uniform_int_distribution<int>(0, n - 1)(rng)];
         else {
-            S.sp = sp;
+            S.sp = (&S == &sb && spB) ? *spB : sp;
             S.sp.noise = false;
             S.search(pos, hist);
             m = S.pickMove(0.f);
