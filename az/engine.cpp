@@ -55,6 +55,7 @@ class ParallelSearch {
 public:
     const Net* net = nullptr;
     float cInit = 1.25f, cBase = 19652.f, fpuRed = 0.25f;
+    float policyTemp = 1.6f;   // tuned 2026-11-28 with net_1300: +127 ± 47 Elo vs 1.0 (data/tune/search_1300.log)
     std::vector<PNode> nodes;
     std::vector<Acc> accs;
     size_t nNodes = 0, nAccs = 0;
@@ -147,7 +148,7 @@ public:
         int ai = int(nAccs++);
         refreshAcc(*net, p, accs[ai]);
         float pri[MAX_MOVES], wdl[3];
-        evaluate(*net, accs[ai], p.stm, ms, n, pri, wdl);
+        evaluate(*net, accs[ai], p.stm, ms, n, pri, wdl, policyTemp);
         for (int i = 0; i < n; ++i) { nodes[nNodes + i] = PNode{}; nodes[nNodes + i].move = ms[i]; nodes[nNodes + i].prior = pri[i]; }
         nodes[0].first = int32_t(nNodes);
         nodes[0].nch = uint8_t(n);
@@ -321,7 +322,7 @@ private:
             Acc& dst = ai >= 0 ? accs[ai] : c.tmp;
             if (parentAcc >= 0) updateAcc(*net, accs[parentAcc], prev, pos, dst);
             else refreshAcc(*net, pos, dst);
-            evaluate(*net, dst, pos.stm, ms, n, pri, wdl);
+            evaluate(*net, dst, pos.stm, ms, n, pri, wdl, policyTemp);
             v = wdl[0] - wdl[2];
             d = wdl[1];
         }
@@ -452,6 +453,8 @@ struct Engine {
                           << "option name Nodes type spin default 0 min 0 max 2000000000\n"
                           << "option name EvalFile type string default <embedded>\n"
                           << "option name TreeReuse type check default true\n"
+                          << "option name PolicyTemp type string default 1.6\n"
+                          << "option name CPuct type string default 1.25\n"
                           << "uciok" << std::endl;
             } else if (cmd == "isready") std::cout << "readyok" << std::endl;
             else if (cmd == "setoption") {
@@ -471,6 +474,8 @@ struct Engine {
                     else if (name == "MoveTime") fixedMoveTime = std::stoll(value);
                     else if (name == "Nodes") fixedNodes = std::stoll(value);
                     else if (name == "TreeReuse") { S.allowReuse = value == "true"; S.haveTree = false; }
+                    else if (name == "PolicyTemp") { S.policyTemp = std::clamp(std::stof(value), 0.1f, 10.f); S.haveTree = false; }
+                    else if (name == "CPuct") { S.cInit = std::clamp(std::stof(value), 0.1f, 20.f); S.haveTree = false; }
                     else if (name == "EvalFile") {
                         Net n2;
                         if (value == "<embedded>" ? loadNetMem(n2, az_net_blob, size_t(az_net_blob_end - az_net_blob)) : n2.load(value)) {

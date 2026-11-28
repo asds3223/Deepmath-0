@@ -87,6 +87,7 @@ def main():
     ap.add_argument("--pairs", type=int, default=10)
     ap.add_argument("--evalfile", default="")
     ap.add_argument("--tree-reuse", type=int, default=0, help="engine TreeReuse option (0 keeps the benchmark comparable to pre-reuse runs)")
+    ap.add_argument("--ptemp", type=float, default=1.0, help="engine PolicyTemp (1.0 keeps the benchmark comparable to earlier runs)")
     a = ap.parse_args()
     if a.evalfile:   # preflight: the engine must really load the requested net (no silent fallback to the embedded one)
         pre = subprocess.run([a.engine], input=f"uci\nsetoption name EvalFile value {a.evalfile}\nisready\nquit\n",
@@ -95,7 +96,7 @@ def main():
             sys.exit(f"engine did not load {a.evalfile}:\n{pre[-500:]}")
         print("preflight:", [l for l in pre.splitlines() if "loaded net" in l][0], flush=True)
     az = chess.engine.SimpleEngine.popen_uci([a.engine])
-    opts = {"Threads": 1, "Hash": 128, "TreeReuse": bool(a.tree_reuse)}
+    opts = {"Threads": 1, "Hash": 128, "TreeReuse": bool(a.tree_reuse), "PolicyTemp": str(a.ptemp)}
     if a.evalfile:
         opts["EvalFile"] = a.evalfile
     az.configure(opts)
