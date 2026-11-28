@@ -55,7 +55,7 @@ class ParallelSearch {
 public:
     const Net* net = nullptr;
     float cInit = 1.25f, cBase = 19652.f, fpuRed = 0.25f;
-    float policyTemp = 1.6f;   // tuned 2026-11-28 with net_1300: +127 ± 47 Elo vs 1.0 (data/tune/search_1300.log)
+    float policyTemp = 1.0f;   // 1.6 won same-net A/B (+127) but lost vs GNU Chess depth 2 (31.3% vs 38.4%, 300 games): kept at 1.0
     std::vector<PNode> nodes;
     std::vector<Acc> accs;
     size_t nNodes = 0, nAccs = 0;
@@ -453,7 +453,7 @@ struct Engine {
                           << "option name Nodes type spin default 0 min 0 max 2000000000\n"
                           << "option name EvalFile type string default <embedded>\n"
                           << "option name TreeReuse type check default true\n"
-                          << "option name PolicyTemp type string default 1.6\n"
+                          << "option name PolicyTemp type string default 1.0\n"
                           << "option name CPuct type string default 1.25\n"
                           << "uciok" << std::endl;
             } else if (cmd == "isready") std::cout << "readyok" << std::endl;
